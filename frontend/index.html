@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OS Simulator</title><link rel="stylesheet" href="css/style.css"></head>
+<body>
+<aside class="sidebar"><h1>OS Simulator</h1><nav id="nav"></nav></aside>
+<div class="main">
+ <header class="topbar">
+  <div class="clock" title="Simulation clock">⏱ <span id="clock">00:00:00</span> <span id="status" class="badge">STOPPED</span></div>
+  <div class="controls">
+   <button id="btn-start">▶ Start</button><button id="btn-pause">⏸ Pause</button>
+   <button id="btn-resume">▶ Resume</button><button id="btn-step">⏭ Step</button>
+   <button id="btn-reset" class="danger">↻ Reset</button>
+   <label>Speed <select id="speed"></select></label>
+  </div>
+ </header>
+ <main id="page"></main>
+</div>
+<script type="module" src="js/app.js"></script>
+</body></html>
