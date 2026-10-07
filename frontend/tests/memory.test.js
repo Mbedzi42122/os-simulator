@@ -140,3 +140,36 @@ test('memory must be a whole positive number of KB', () => {
   assert.throws(() => mk(pm, 10.5));
   assert.throws(() => mk(pm, 0));
 });
+
+test('checkConfig validates RAM, page size and virtual memory together', async () => {
+  const { SimulationEngine } = await import('../js/simulation/SimulationEngine.js');
+  const { ProcessManager } = await import('../js/process/ProcessManager.js');
+  const { MemoryManager } = await import('../js/memory/MemoryManager.js');
+  const e = new SimulationEngine();
+  e.registerModule(new ProcessManager(e));
+  const mm = e.registerModule(new MemoryManager(e));
+  assert.deepEqual(mm.checkConfig(32, 4, 128), []);
+  assert.deepEqual(mm.checkConfig(1048576, 8192, 2097152), []);          // 1 GB RAM, 8 MB pages, 2 GB virtual: valid in one step
+  assert.ok(mm.checkConfig(1048576, 1024, 2097152).some((m) => /256 frames/.test(m)));
+  assert.ok(mm.checkConfig(64, 4, 32).some((m) => /cannot exceed the virtual memory/.test(m)));
+  assert.ok(mm.checkConfig(30, 4, 128).some((m) => /multiple of the page size/.test(m)));
+  assert.ok(mm.checkConfig(32, 5, 100).length > 0);
+  assert.ok(mm.checkConfig(32.5, 4, 128).length > 0);
+  mm.applyConfig(1048576, 8192, 2097152);
+  assert.equal(e.state.config.memorySize, 1048576);
+  assert.equal(mm.frames.length, 128);
+  assert.throws(() => mm.applyConfig(10, 4, 128), /multiple/);
+  assert.equal(e.state.config.memorySize, 1048576, 'a failed apply changes nothing');
+});
+
+test('page size cannot change while a live process exists', async () => {
+  const { SimulationEngine } = await import('../js/simulation/SimulationEngine.js');
+  const { ProcessManager } = await import('../js/process/ProcessManager.js');
+  const { MemoryManager } = await import('../js/memory/MemoryManager.js');
+  const e = new SimulationEngine();
+  const pm = e.registerModule(new ProcessManager(e));
+  const mm = e.registerModule(new MemoryManager(e));
+  pm.create({ name: 'a', burstTime: 3, priority: 1, memoryRequired: 8, arrivalTime: 0 });
+  assert.ok(mm.checkConfig(32, 8, 128).some((m) => /no live processes/.test(m)));
+  assert.deepEqual(mm.checkConfig(64, 4, 256).length, 0);                // RAM / virtual size may change, page size stays
+});

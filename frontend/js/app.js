@@ -1,6 +1,6 @@
 import { SimulationEngine } from './simulation/SimulationEngine.js';
 import { SimulationClock } from './simulation/SimulationClock.js';
-import { SPEEDS } from './simulation/SimulationState.js';
+import { SPEEDS, DEFAULT_CONFIG } from './simulation/SimulationState.js';
 import { ProcessManager } from './process/ProcessManager.js';
 import { STATES, TRANSITIONS } from './process/Process.js';
 import { Scheduler, ALGORITHMS } from './cpu/Scheduler.js';
@@ -19,12 +19,19 @@ const sched = engine.registerModule(new Scheduler(engine, pm, vm));
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const PAGES = ['Dashboard', 'Processes', 'CPU & Scheduling', 'Memory', 'Virtual Memory', 'Visualization', 'RAID', 'Event Log', 'Settings'];
-const READY_PAGES = ['Dashboard', 'Processes', 'CPU & Scheduling', 'Memory', 'Virtual Memory', 'Visualization', 'RAID', 'Event Log'];
-const ui = { vmTab: 'demand', memSel: null, translation: null, page: 'Dashboard', selected: null, search: '', error: '', logFilter: '', logSearch: '' };
+const READY_PAGES = ['Dashboard', 'Processes', 'CPU & Scheduling', 'Memory', 'Virtual Memory', 'Visualization', 'RAID', 'Event Log', 'Settings'];
+const ui = { vmTab: 'demand', memSel: null, translation: null, page: 'Dashboard', selected: null, search: '', error: '', notice: '', logFilter: '', logSearch: '' };
 
 const badge = (s) => `<span class="badge s-${s}">${s}</span>`;
-const confirmDialog = (msg) => window.confirm(msg);
-const guard = (fn) => { try { ui.error = ''; fn(); } catch (e) { ui.error = e.errors ? e.errors.join('\n') : e.message; } render(true); };
+// Appearance / behaviour preferences (kept in the browser; the simulation itself is unaffected)
+const PREFS_KEY = 'os-simulator-prefs';
+const prefs = { theme: 'light', confirm: true };
+try { Object.assign(prefs, JSON.parse(localStorage.getItem(PREFS_KEY) || '{}')); } catch { /* storage unavailable: use defaults */ }
+const applyTheme = () => { document.documentElement.dataset.theme = prefs.theme === 'dark' ? 'dark' : 'light'; };
+const savePrefs = () => { try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch { /* ignore */ } };
+applyTheme();
+const confirmDialog = (msg) => !prefs.confirm || window.confirm(msg);
+const guard = (fn) => { try { ui.error = ''; ui.notice = ''; fn(); } catch (e) { ui.error = e.errors ? e.errors.join('\n') : e.message; } render(true); };
 
 // Controls ------------------------------------------------------------------
 $('#btn-start').onclick = () => engine.start();
@@ -82,19 +89,158 @@ function processes() {
    <div><label>Priority (0–10)</label><input name="priority" type="number" value="5"></div>
    <div><label>Memory (KB)</label><input name="memoryRequired" type="number" value="16"></div>
    <div><label>Arrival time</label><input name="arrivalTime" type="number" value="0"></div>
-   <div class="row"><button class="primary">Create</button><button type="button" id="demo-load" title="Add three sample processes with different sizes">Load demo processes</button></div></form>
+   <div class="row"><button class="primary">Create</button><button type="button" id="demo-load" title="Add five sample processes (P1–P5) with different arrival times, bursts, priorities and sizes">Load demo processes</button></div></form>
    <div class="err">${esc(ui.error)}</div></div>
   <div class="card"><div class="row" style="justify-content:space-between"><h2>Process table</h2>
    <input id="psearch" placeholder="Search PID, name or state" value="${esc(ui.search)}" style="max-width:240px"></div>${table}</div>${detail}`;
 }
 
-function eventLog() {
+// Event severity: danger = red (failures / data at risk), warn = amber (degraded / needs attention), ok = green (recovered)
+const EVENT_SEVERITY = {
+  RAID_DISK_FAILED: 'danger', PAGE_IO_ERROR: 'danger', PROCESS_ABORTED: 'danger', VIRTUAL_MEMORY_FULL: 'danger',
+  RAID_RECONSTRUCT: 'warn', RAID_REBUILD_STARTED: 'warn', RAID_RECREATED: 'warn',
+  RAID_REBUILD_COMPLETE: 'ok',
+};
+const SEVERITY_ICON = { danger: '⚠', warn: '▲', ok: '✔' };
+const SEVERITY_LABEL = { danger: 'DANGER', warn: 'WARNING', ok: 'OK' };
+const severityOf = (e) => EVENT_SEVERITY[e.type] || '';
+
+function visibleEvents() {
   const f = ui.logFilter, q = ui.logSearch.toLowerCase();
-  const ev = engine.state.events.filter((e) => (!f || e.type === f) && (!q || e.message.toLowerCase().includes(q)));
-  const types = [...new Set(engine.state.events.map((e) => e.type))];
+  return engine.state.events.filter((e) => (!f || e.type === f) && (!q || e.message.toLowerCase().includes(q)));
+}
+
+/** Offer `text` to the browser as a downloaded file. */
+function saveFile(name, text, mime = 'text/plain') {
+  const url = URL.createObjectURL(new Blob([text], { type: `${mime};charset=utf-8` }));
+  const a = document.createElement('a');
+  a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/** Download the events currently shown (respecting the filter/search) as a plain-text file, oldest first. */
+function downloadLog() {
+  const ev = visibleEvents();
+  if (!ev.length) throw new Error('There are no events to download.');
+  const stamp = new Date();
+  const lines = [
+    'OS Simulator - event log',
+    `Exported: ${stamp.toLocaleString()}`,
+    `Events: ${ev.length}${ui.logFilter || ui.logSearch ? ` (filtered${ui.logFilter ? ` by type ${ui.logFilter}` : ''}${ui.logSearch ? `, search "${ui.logSearch}"` : ''})` : ''}`,
+    '='.repeat(72),
+    ...ev.map((e) => `[${SimulationClock.format(e.time)}] [${(SEVERITY_LABEL[severityOf(e)] || 'INFO').padEnd(7)}] [${e.type}] ${e.message}`),
+  ];
+  const pad = (n) => String(n).padStart(2, '0');
+  const name = `os-simulator-log-${stamp.getFullYear()}-${pad(stamp.getMonth() + 1)}-${pad(stamp.getDate())}_${pad(stamp.getHours())}${pad(stamp.getMinutes())}${pad(stamp.getSeconds())}.txt`;
+  saveFile(name, lines.join('\r\n') + '\r\n', 'text/plain');
+}
+
+function eventLog() {
+  const f = ui.logFilter, ev = visibleEvents(), all = engine.state.events;
+  const types = [...new Set(all.map((e) => e.type))];
+  const count = (sv) => all.filter((e) => severityOf(e) === sv).length;
+  const danger = count('danger'), warn = count('warn');
   return `<div class="card"><div class="row"><select id="lfilter" style="max-width:220px"><option value="">All events</option>${types.map((t) => `<option${t === f ? ' selected' : ''}>${t}</option>`).join('')}</select>
-   <input id="lsearch" placeholder="Search events" value="${esc(ui.logSearch)}" style="max-width:240px"><button id="lclear">Clear log</button></div>
-   <div class="log">${ev.length ? ev.slice().reverse().map((e) => `<div>${SimulationClock.format(e.time)}&nbsp; ${esc(e.message)}</div>`).join('') : '<div class="empty">No events.</div>'}</div></div>`;
+   <input id="lsearch" placeholder="Search events" value="${esc(ui.logSearch)}" style="max-width:240px"><button id="ldownload"${ev.length ? '' : ' disabled'} title="Save the events shown below as a .txt file">⬇ Download log</button><button id="lclear">Clear log</button></div>
+   <div class="legend"><span class="badge ev-danger">⚠ ${danger} danger</span><span class="badge ev-warn">▲ ${warn} warning</span><span class="empty">Red = failure / data at risk (e.g. disk failure, page I/O error, process aborted, virtual memory full). Amber = degraded or needs attention. Green = recovered.</span></div>
+   <div class="log">${ev.length ? ev.slice().reverse().map((e) => { const sv = severityOf(e); return `<div class="ev${sv ? ' ev-' + sv : ''}" title="${e.type}">${sv ? `<span class="ev-icon">${SEVERITY_ICON[sv]}</span>` : ''}${SimulationClock.format(e.time)}&nbsp; ${esc(e.message)}</div>`; }).join('') : '<div class="empty">No events.</div>'}</div></div>`;
+}
+
+// Settings -------------------------------------------------------------------
+const currentSettings = () => {
+  const c = engine.state.config, r = engine.state.raid.config;
+  return { speed: engine.state.speed, schedulingAlgorithm: c.schedulingAlgorithm, timeQuantum: c.timeQuantum,
+    memorySize: c.memorySize, pageSize: c.pageSize, virtualMemorySize: c.virtualMemorySize,
+    replacementAlgorithm: c.replacementAlgorithm, pageFaultTime: c.pageFaultTime,
+    raid: { level: r.level, disks: r.disks, capacity: r.capacity } };
+};
+
+/** Every problem with a complete settings object (nothing is changed). */
+function validateSettings(s) {
+  const errs = [], int = Number.isInteger;
+  if (!SPEEDS.includes(s.speed)) errs.push(`Speed must be one of ${SPEEDS.join(', ')}x.`);
+  if (!ALGORITHMS[s.schedulingAlgorithm]) errs.push('Unknown CPU scheduling algorithm.');
+  if (!(int(s.timeQuantum) && s.timeQuantum > 0)) errs.push('Time quantum must be a whole number greater than zero.');
+  if (!LIVE_ALGORITHMS.includes(s.replacementAlgorithm)) errs.push('Page replacement algorithm must be FIFO or LRU.');
+  if (!(int(s.pageFaultTime) && s.pageFaultTime >= 1 && s.pageFaultTime <= 10)) errs.push('Page fault service time must be a whole number of ticks from 1 to 10.');
+  errs.push(...mm.checkConfig(s.memorySize, s.pageSize, s.virtualMemorySize));
+  return errs;
+}
+
+/** Validate everything first, then apply it (the RAID array first, because it is the only part that can still refuse). */
+function applySettings(s) {
+  const errs = validateSettings(s);
+  if (errs.length) throw new Error(errs.join('\n'));
+  const r = engine.state.raid.config;
+  if (s.raid && (s.raid.level !== r.level || s.raid.disks !== r.disks || s.raid.capacity !== r.capacity)) raid.configure(s.raid);
+  sched.configure({ schedulingAlgorithm: s.schedulingAlgorithm, timeQuantum: s.timeQuantum });
+  vm.configure({ replacementAlgorithm: s.replacementAlgorithm, pageFaultTime: s.pageFaultTime });
+  mm.applyConfig(s.memorySize, s.pageSize, s.virtualMemorySize);
+  engine.setSpeed(s.speed);
+  $('#speed').value = String(s.speed);
+}
+
+/** Turn an imported JSON document into a settings object (missing values keep their current setting). */
+function parseImportedSettings(text) {
+  let doc;
+  try { doc = JSON.parse(text); } catch { throw new Error('That file is not valid JSON.'); }
+  const src = doc && typeof doc === 'object' ? (doc.settings && typeof doc.settings === 'object' ? doc.settings : doc) : null;
+  if (!src || Array.isArray(src)) throw new Error('That file does not contain simulator settings.');
+  const cur = currentSettings(), out = { ...cur }, errs = [];
+  const take = (k, type) => {
+    if (!(k in src)) return;
+    if (typeof src[k] !== type) errs.push(`"${k}" must be a ${type}.`); else out[k] = src[k];
+  };
+  ['speed', 'timeQuantum', 'memorySize', 'pageSize', 'virtualMemorySize', 'pageFaultTime'].forEach((k) => take(k, 'number'));
+  ['schedulingAlgorithm', 'replacementAlgorithm'].forEach((k) => take(k, 'string'));
+  if ('raid' in src) {
+    const r = src.raid;
+    if (r && typeof r === 'object' && ['level', 'disks', 'capacity'].every((k) => typeof r[k] === 'number')) out.raid = { level: r.level, disks: r.disks, capacity: r.capacity };
+    else errs.push('"raid" must contain numeric level, disks and capacity.');
+  }
+  if (!Object.keys(src).some((k) => k in cur)) errs.push('No known settings were found in that file.');
+  if (errs.length) throw new Error(errs.join('\n'));
+  return out;
+}
+
+function settingsPage() {
+  const s = currentSettings(), n = engine.state.processes.length;
+  const sel = (name, opts, cur) => `<select name="${name}">${opts.map(([v, l]) => `<option value="${v}"${String(v) === String(cur) ? ' selected' : ''}>${l}</option>`).join('')}</select>`;
+  const frames = s.pageSize ? Math.floor(s.memorySize / s.pageSize) : 0;
+  return `<div class="info"><b>What is this?</b> One place for the simulator's configuration. <b>Apply settings</b> checks every value first and changes nothing if any of them is invalid. RAM, page size and virtual memory size depend on each other, so they are checked together. They can only change while no pages are loaded and no live processes exist (use <b>Reset</b> first).</div>
+  ${ui.notice ? `<div class="ok-note">${esc(ui.notice)}</div>` : ''}
+  <form id="setform">
+   <div class="grid">
+    <div class="card"><h2>Simulation</h2><div class="fields"><div><label>Speed</label>${sel('speed', SPEEDS.map((v) => [v, v + 'x']), s.speed)}</div></div></div>
+    <div class="card"><h2>CPU scheduling</h2><div class="fields">
+     <div><label>Algorithm</label>${sel('schedulingAlgorithm', Object.entries(ALGORITHMS).map(([k, a]) => [k, a.label]), s.schedulingAlgorithm)}</div>
+     <div><label>Time quantum (Round Robin)</label><input name="timeQuantum" type="number" value="${s.timeQuantum}"></div></div></div>
+    <div class="card"><h2>Memory</h2><div class="fields">
+     <div><label>Physical memory / RAM (KB)</label><input name="memorySize" type="number" value="${s.memorySize}"></div>
+     <div><label>Page / frame size (KB)</label><input name="pageSize" type="number" value="${s.pageSize}"></div>
+     <div><label>Virtual memory size (KB)</label><input name="virtualMemorySize" type="number" value="${s.virtualMemorySize}"></div></div>
+     <div class="calc">Currently ${s.memorySize} KB / ${s.pageSize} KB = <b>${frames} frames</b></div></div>
+    <div class="card"><h2>Virtual memory</h2><div class="fields">
+     <div><label>Page replacement</label>${sel('replacementAlgorithm', LIVE_ALGORITHMS.map((a) => [a, a]), s.replacementAlgorithm)}</div>
+     <div><label>Page fault service time (ticks, 1–10)</label><input name="pageFaultTime" type="number" value="${s.pageFaultTime}"></div></div></div>
+   </div>
+   <div class="row"><button class="primary">Apply settings</button><span class="empty" style="padding:0">RAID: ${RAID_LEVELS[s.raid.level].label}, ${s.raid.disks} disks × ${s.raid.capacity} blocks (change it on the RAID page; it is included in export / import).</span></div>
+   <div class="err">${esc(ui.error)}</div>
+  </form>
+  <div class="grid" style="margin-top:14px">
+   <div class="card"><h2>Appearance &amp; behaviour</h2>
+    <div class="fields"><div><label>Theme</label><select id="set-theme"><option value="light"${prefs.theme === 'light' ? ' selected' : ''}>Light</option><option value="dark"${prefs.theme === 'dark' ? ' selected' : ''}>Dark</option></select></div></div>
+    <label class="check"><input type="checkbox" id="set-confirm"${prefs.confirm ? ' checked' : ''}> Ask for confirmation before destructive actions (reset, clear log, remove process, re-create RAID)</label></div>
+   <div class="card"><h2>Quick actions</h2><div class="row">
+    <button id="demo-load" title="Add five sample processes (P1–P5)">Load demo processes</button>
+    <button id="ldownload"${engine.state.events.length ? '' : ' disabled'}>⬇ Download event log</button>
+    <button id="lclear"${engine.state.events.length ? '' : ' disabled'}>Clear event log</button></div>
+    <div class="row" style="margin-top:8px"><button class="danger" id="set-reset" title="Clears all processes and the log and restores the default settings">↻ Reset to defaults</button></div>
+    <div class="empty" style="padding:6px 0 0;text-align:left">${n} process(es) and ${engine.state.events.length} log event(s) currently exist. Resetting removes them.</div></div>
+   <div class="card"><h2>Export / import settings</h2><div class="row"><button id="set-export">⬇ Export settings (.json)</button></div>
+    <div style="margin-top:10px"><label>Import settings from a .json file</label><input type="file" id="set-import" accept=".json,application/json"></div>
+    <div class="empty" style="padding:6px 0 0;text-align:left">Importing is checked exactly like Apply settings.</div></div>
+  </div>`;
 }
 
 const COLORS = ['#4e79a7', '#f28e2b', '#59a14f', '#e15759', '#76b7b2', '#edc948', '#b07aa1', '#ff9da7'];
@@ -130,28 +276,57 @@ function cpuPage() {
    ${st.rows.length ? `<table><thead><tr><th>PID</th><th>Completion</th><th>Waiting</th><th>Turnaround</th><th>Response</th></tr></thead><tbody>${st.rows.map((r) => `<tr><td>${r.pid}</td><td>${r.completion}</td><td>${r.waiting}</td><td>${r.turnaround}</td><td>${r.response}</td></tr>`).join('')}</tbody></table>` : '<div class="empty">Statistics appear as processes complete.</div>'}</div>`;
 }
 
+/** Load every page of a process that is still on disk into free frames (no page is evicted). */
+function loadPages(p) {
+  const t = mm.table(p.pid);
+  if (!t) throw new Error(`${p.pid} has no page table yet.`);
+  const need = t.filter((f) => f === null).length, free = mm.stats().free;
+  if (!need) throw new Error(`All ${t.length} page(s) of ${p.pid} are already in RAM.`);
+  if (need > free) throw new Error(`${p.pid} needs ${need} free frame(s) but only ${free} are free. Free some frames first (terminate a process) or use a larger RAM size.`);
+  t.forEach((f, pg) => { if (f === null) vm.requestPage(p.pid, pg); });
+}
+
 function memPage() {
   const s = engine.state, c = s.config, st = mm.stats(), frames = s.memory.frames;
-  const sel = ui.memSel && mm.table(ui.memSel) ? pm.get(ui.memSel) : null, x = ui.translation;
   const live = pm.list.filter((p) => mm.hasTable(p.pid));
+  if (!(ui.memSel && mm.table(ui.memSel)) && live.length) ui.memSel = live[0].pid; // always show a page table when one exists
+  const sel = ui.memSel && mm.table(ui.memSel) ? pm.get(ui.memSel) : null, x = ui.translation;
   const table = sel ? mm.table(sel.pid) : null;
-  return `<div class="info"><b>What is paging?</b> Physical memory is divided into fixed-size <i>frames</i> and every process into same-size <i>pages</i>. Each process has a <i>page table</i> that maps page → frame, so its pages can sit anywhere in memory and there is no external fragmentation. Pages are loaded <i>on demand</i> by the Virtual Memory manager (see the Virtual Memory page) the first time they are referenced. Logical address = (page number, offset); physical address = frame × page size + offset. Units are KB. Create processes on the Processes page, then Start or Step the simulation.</div>
+  const freeList = frames.map((f, i) => (f.pid === null ? i : -1)).filter((i) => i >= 0);
+  const usedList = frames.map((f, i) => (f.pid !== null ? i : -1)).filter((i) => i >= 0);
+  const allocation = (p) => {
+    const t = mm.table(p.pid);
+    return `<div class="alloc"><b>Process ${p.pid}</b> (${esc(p.name)}, ${p.memoryRequired} KB) — pages = ceiling(${p.memoryRequired} / ${c.pageSize}) = ${p.pages}, ${mm.residentPages(p.pid)} in RAM
+     ${t.map((f, pg) => f === null
+    ? `<div class="alloc-row disk">Page ${pg} ─────► Disk (secondary storage, not in RAM)</div>`
+    : `<div class="alloc-row ram">Page ${pg} ─────► Frame ${f}</div>`).join('')}</div>`;
+  };
+  return `<div class="info"><b>What is paging?</b> Physical memory is divided into fixed-size <i>frames</i> and every process into same-size <i>pages</i>. Each process has a <i>page table</i> that maps page → frame, so its pages can sit anywhere in memory and there is no external fragmentation. Pages are loaded <i>on demand</i> by the Virtual Memory manager (see the Virtual Memory page) the first time they are referenced, or you can load them yourself with the buttons below. Logical address = (page number, offset); physical address = frame × page size + offset. Units are KB. Create processes on the Processes page, then Start or Step the simulation.</div>
   <div class="card"><h2>Configuration</h2><form id="mform" class="fields">
-   <div><label>Physical memory (KB)</label><input name="memorySize" type="number" value="${c.memorySize}"></div>
+   <div><label>Physical memory / RAM (KB)</label><input name="memorySize" type="number" value="${c.memorySize}"></div>
    <div><label>Page / frame size (KB)</label><input name="pageSize" type="number" value="${c.pageSize}"></div>
    <div><button class="primary">Apply</button></div></form>
-   <div class="err">${esc(ui.error)}</div></div>
+   <div class="err">${esc(ui.error)}</div>
+   <div class="calc"><b>Number of frames</b> = RAM / page size = ${c.memorySize} KB / ${c.pageSize} KB = <b>${st.frames} frames</b></div></div>
   <div class="card"><h2>Physical frames (${st.used}/${st.frames} used)</h2>
-   <div class="frames">${frames.map((f, i) => `<div class="frame" title="${f.pid ? `${f.pid} page ${f.page}` : 'free'}" style="${f.pid ? `background:${colour(f.pid)};color:#fff` : ''}">F${i}<br>${f.pid ? `${f.pid}:p${f.page}` : 'free'}</div>`).join('')}</div></div>
+   <div class="legend"><span><i class="lg-ram"></i>Page in RAM (coloured by process)</span><span><i class="lg-free"></i>Free frame</span><span><i class="lg-disk"></i>Page on disk (secondary storage) — see tables below</span></div>
+   <div class="frames">${frames.map((f, i) => f.pid
+    ? `<div class="frame used" title="${f.pid} page ${f.page}" style="background:${colour(f.pid)};color:#fff">F${i}<br>${f.pid}:p${f.page}</div>`
+    : `<div class="frame free" title="free frame">F${i}<br>free</div>`).join('')}</div></div>
   <div class="grid">
+   <div class="card"><h2>Free-frame list (${freeList.length})</h2><div class="flist">${freeList.length ? freeList.map((i) => `<span class="badge fl-free">F${i}</span>`).join('') : '<span class="empty">None — RAM is full</span>'}</div></div>
+   <div class="card"><h2>Occupied-frame list (${usedList.length})</h2><div class="flist">${usedList.length ? usedList.map((i) => `<span class="badge" style="background:${colour(frames[i].pid)};color:#fff" title="frame ${i} holds ${frames[i].pid} page ${frames[i].page}">F${i} ← ${frames[i].pid}:p${frames[i].page}</span>`).join('') : '<span class="empty">None — all frames are free</span>'}</div></div>
    <div class="card"><h2>Frames used</h2><div class="big">${st.used} / ${st.frames}</div>${st.utilisation}% of ${st.memorySize} KB</div>
-   <div class="card"><h2>Free frames</h2><div class="big">${st.free}</div>of ${st.frames}, each ${st.pageSize} KB</div>
    <div class="card"><h2>Internal fragmentation</h2><div class="big">${st.internalFragmentation} KB</div>unused part of each process's last page</div>
    <div class="card"><h2>Waiting for virtual memory</h2>${vm.stats().waiting.length ? vm.stats().waiting.map((p) => `<span class="badge s-WAITING">${p}</span>`).join(' ') : '<span class="empty">None</span>'}</div></div>
-  <div class="card"><h2>Page tables</h2>${live.length ? `<table><thead><tr><th>PID</th><th>Name</th><th>Size</th><th>Pages</th><th>In memory</th></tr></thead><tbody>${live.map((p) =>
-    `<tr data-mpid="${p.pid}" class="${p.pid === ui.memSel ? 'sel' : ''}"><td>${p.pid}</td><td>${esc(p.name)}</td><td>${p.memoryRequired} KB</td><td>${p.pages}</td><td>${mm.residentPages(p.pid)}</td></tr>`).join('')}</tbody></table>` : '<div class="empty">No process has an address space yet. Create processes on the Processes page.</div>'}</div>
-  ${sel ? `<div class="grid"><div class="card"><h2>Page table — ${sel.pid}</h2><table><thead><tr><th>Page</th><th>Frame</th><th>Present</th></tr></thead><tbody>${table.map((f, p) =>
-    `<tr><td>${p}</td><td>${f === null ? '—' : f}</td><td>${f === null ? '✗ (on backing store)' : '✓'}</td></tr>`).join('')}</tbody></table></div>
+  <div class="card"><h2>Page-to-frame allocation</h2>
+   <div class="row"><button id="mem-load-sel"${sel ? '' : ' disabled'}>Load all pages of ${sel ? sel.pid : 'selected process'} into RAM</button><button id="mem-load-all"${live.length ? '' : ' disabled'}>Load pages of every process (while frames are free)</button></div>
+   ${live.length ? live.map(allocation).join('') : '<div class="empty">No process has an address space yet. Create processes on the Processes page.</div>'}</div>
+  <div class="card"><h2>Process list (click a row to see its page table)</h2>${live.length ? `<table><thead><tr><th>PID</th><th>Name</th><th>Size</th><th>Pages</th><th>In RAM</th><th>On disk</th></tr></thead><tbody>${live.map((p) =>
+    `<tr data-mpid="${p.pid}" class="${p.pid === ui.memSel ? 'sel' : ''}"><td>${p.pid}</td><td>${esc(p.name)}</td><td>${p.memoryRequired} KB</td><td>${p.pages}</td><td>${mm.residentPages(p.pid)}</td><td>${p.pages - mm.residentPages(p.pid)}</td></tr>`).join('')}</tbody></table>` : '<div class="empty">No process has an address space yet. Create processes on the Processes page.</div>'}</div>
+  ${sel ? `<div class="grid"><div class="card"><h2>Page table — ${sel.pid} (${esc(sel.name)})</h2><table class="pt"><thead><tr><th>Page</th><th>Frame</th><th>Valid Bit</th><th>Location</th></tr></thead><tbody>${table.map((f, p) =>
+    `<tr class="${f === null ? 'pt-disk' : 'pt-ram'}"><td>${p}</td><td>${f === null ? '-' : f}</td><td>${f === null ? 0 : 1}</td><td>${f === null ? 'Disk' : 'RAM'}</td></tr>`).join('')}</tbody></table>
+    <div class="empty" style="margin-top:6px">Valid bit 1 = page is in a RAM frame; 0 = page is on secondary storage (a reference causes a page fault).</div></div>
    <div class="card"><h2>Translate an address</h2><form id="xform" class="row"><input name="address" type="number" placeholder="0–${sel.memoryRequired - 1}" style="max-width:140px"><button class="primary">Translate</button></form>
    ${x && x.pid === sel.pid ? (x.resident ? `<div class="flow" style="margin-top:10px"><span class="badge">logical ${x.address}</span>→<span class="badge">page ${x.page} · offset ${x.offset}</span>→<span class="badge">page table: ${x.page} ↦ ${x.frame}</span>→<span class="badge s-RUNNING">physical ${x.physical}</span></div><div style="margin-top:6px">${x.frame} × ${c.pageSize} + ${x.offset} = ${x.physical}</div>`
      : `<div class="flow" style="margin-top:10px"><span class="badge">logical ${x.address}</span>→<span class="badge">page ${x.page} · offset ${x.offset}</span>→<span class="badge s-TERMINATED">page ${x.page} not in memory: page fault</span></div>`) : ''}</div></div>` : ''}`;
@@ -285,7 +460,7 @@ function raidPage() {
   ${raidLink()}${raidCompare(R)}`;
 }
 
-const VIEWS = { RAID: raidPage, 'Virtual Memory': vmPage, Memory: memPage, 'CPU & Scheduling': cpuPage, Dashboard: dashboard, Processes: processes, 'Event Log': eventLog };
+const VIEWS = { RAID: raidPage, 'Virtual Memory': vmPage, Memory: memPage, 'CPU & Scheduling': cpuPage, Dashboard: dashboard, Processes: processes, 'Event Log': eventLog, Settings: settingsPage };
 
 function render(force = false) {
   renderTopbar();
@@ -307,7 +482,7 @@ function render(force = false) {
 // Delegated events (survive re-rendering) -----------------------------------
 document.addEventListener('click', (e) => {
   const t = e.target;
-  if (t.dataset.page) { ui.page = t.dataset.page; ui.error = ''; render(true); }
+  if (t.dataset.page) { ui.page = t.dataset.page; ui.error = ''; ui.notice = ''; render(true); }
   else if (t.dataset.rfail !== undefined) guard(() => raid.failDisk(Number(t.dataset.rfail)));
   else if (t.dataset.rrepl !== undefined) guard(() => raid.replaceDisk(Number(t.dataset.rrepl)));
   else if (t.id === 'raid-rebuild') guard(() => raid.completeRebuild());
@@ -317,11 +492,37 @@ document.addEventListener('click', (e) => {
   else if (t.closest('tr[data-mpid]')) { ui.memSel = t.closest('tr').dataset.mpid; ui.translation = null; render(true); }
   else if (t.id === 'vm-example') guard(() => vm.run({ refString: '7 0 1 2 0 3 0 4 2 3 0 3 2 1 2 0 1 7 0 1', frames: 3, algorithm: 'FIFO' }));
   else if (t.id === 'vm-trace') guard(() => vm.runTrace(engine.state.virtualMemory.lab.algorithm));
-  else if (t.id === 'demo-load') guard(() => [['Demo A', 10, 3, 24], ['Demo B', 8, 1, 24], ['Demo C', 12, 2, 40]].forEach(([name, burstTime, priority, memoryRequired]) =>
-    pm.create({ name, burstTime, priority, memoryRequired, arrivalTime: 0 })));
+  else if (t.id === 'demo-load') guard(() => [
+    // name, arrivalTime, burstTime, priority, memoryRequired (KB)
+    ['P1', 0, 8, 2, 12],
+    ['P2', 1, 5, 1, 8],
+    ['P3', 2, 12, 3, 20],
+    ['P4', 3, 6, 2, 16],
+    ['P5', 4, 10, 4, 24],
+  ].forEach(([name, arrivalTime, burstTime, priority, memoryRequired]) =>
+    pm.create({ name, arrivalTime, burstTime, priority, memoryRequired })));
+  else if (t.id === 'mem-load-sel') guard(() => loadPages(pm.get(ui.memSel)));
+  else if (t.id === 'mem-load-all') guard(() => {
+    let loaded = 0;
+    for (const p of pm.list.filter((q) => mm.hasTable(q.pid))) {
+      const need = mm.table(p.pid).filter((f) => f === null).length;
+      if (need && need <= mm.stats().free) { loadPages(p); loaded++; }
+    }
+    if (!loaded) throw new Error('Nothing to load: every process is fully in RAM, or there are not enough free frames for any remaining process.');
+  });
   else if (t.dataset.to) guard(() => pm.transition(ui.selected, t.dataset.to));
   else if (t.dataset.remove !== undefined) {
     if (confirmDialog(`Remove ${ui.selected}?`)) guard(() => { pm.remove(ui.selected); ui.selected = null; });
+  } else if (t.id === 'set-export') {
+    guard(() => { saveFile('os-simulator-settings.json', JSON.stringify({ app: 'os-simulator', version: 1, exported: new Date().toISOString(), settings: currentSettings() }, null, 2) + '\n', 'application/json'); ui.notice = 'Settings exported.'; });
+  } else if (t.id === 'set-reset') {
+    if (confirmDialog('Reset to defaults? This clears all processes and the event log and restores the default settings.')) guard(() => {
+      Object.assign(engine.state.config, DEFAULT_CONFIG);
+      ui.selected = null; ui.memSel = null; ui.translation = null;
+      engine.reset(); engine.setSpeed(1); $('#speed').value = '1';
+      ui.notice = 'Everything was reset to the default settings.';
+    });
+  } else if (t.id === 'ldownload') { guard(() => downloadLog());
   } else if (t.id === 'lclear') { if (confirmDialog('Clear the event log?')) { engine.state.events.length = 0; render(true); } }
 });
 document.addEventListener('submit', (e) => {
@@ -334,6 +535,17 @@ document.addEventListener('submit', (e) => {
     if (F === 'xform') guard(() => { ui.translation = mm.translate(ui.memSel, d.address === '' ? NaN : Number(d.address)); });
     if (F === 'raform') guard(() => raid.configure({ level: Number(d.level), disks: Number(d.disks), capacity: Number(d.capacity) }));
     if (F === 'vmform') guard(() => vm.run({ refString: d.refString, frames: Number(d.frames), algorithm: d.algorithm }));
+    return;
+  }
+  if (e.target.id === 'setform') {
+    e.preventDefault();
+    const d = Object.fromEntries(new FormData(e.target));
+    guard(() => {
+      applySettings({ ...currentSettings(), speed: Number(d.speed), schedulingAlgorithm: d.schedulingAlgorithm, timeQuantum: Number(d.timeQuantum),
+        memorySize: Number(d.memorySize), pageSize: Number(d.pageSize), virtualMemorySize: Number(d.virtualMemorySize),
+        replacementAlgorithm: d.replacementAlgorithm, pageFaultTime: Number(d.pageFaultTime) });
+      ui.notice = 'Settings applied.';
+    });
     return;
   }
   if (e.target.id === 'sform') {
@@ -351,7 +563,24 @@ document.addEventListener('input', (e) => {
   if (e.target.id === 'psearch') { ui.search = e.target.value; render(true); }
   if (e.target.id === 'lsearch') { ui.logSearch = e.target.value; render(true); }
 });
-document.addEventListener('change', (e) => { if (e.target.id === 'lfilter') { ui.logFilter = e.target.value; render(true); } });
+document.addEventListener('change', (e) => {
+  const id = e.target.id;
+  if (id === 'lfilter') { ui.logFilter = e.target.value; render(true); }
+  else if (id === 'set-theme') { prefs.theme = e.target.value; savePrefs(); applyTheme(); render(true); }
+  else if (id === 'set-confirm') { prefs.confirm = e.target.checked; savePrefs(); render(true); }
+  else if (id === 'set-import') {
+    const file = e.target.files[0];
+    if (!file) return;
+    file.text().then((text) => guard(() => {
+      const imported = parseImportedSettings(text);
+      const errs = validateSettings(imported);
+      if (errs.length) throw new Error('Import failed:\n' + errs.join('\n'));
+      if (!confirmDialog(`Apply the settings from "${file.name}"?`)) return;
+      applySettings(imported);
+      ui.notice = `Settings imported from ${file.name}.`;
+    })).catch(() => { ui.error = 'Could not read that file.'; render(true); });
+  }
+});
 
 // Re-render only when the simulation state changes (not on every event).
 engine.bus.on('STATE_CHANGED', () => render());

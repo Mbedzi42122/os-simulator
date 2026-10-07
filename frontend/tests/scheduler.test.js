@@ -90,3 +90,34 @@ test('reset clears scheduler state', () => {
   assert.deepEqual(e.state.readyQueue, []);
   assert.deepEqual(e.state.gantt, []);
 });
+
+test('SJF is preemptive (SRTF): a shorter arrival takes the CPU', () => {
+  const { e, pm, s } = setup({ schedulingAlgorithm: 'SJF' });
+  add(pm, [8, 4, 9, 5], { arr: [0, 1, 2, 3] }); runAll(e, pm);
+  assert.deepEqual(e.state.gantt.map((g) => [g.pid, g.start, g.end]),
+    [['P001', 0, 1], ['P002', 1, 5], ['P004', 5, 10], ['P001', 10, 17], ['P003', 17, 26]]);
+  assert.deepEqual(pm.list.map((p) => p.completionTime), [17, 5, 26, 10]);
+  assert.deepEqual(wait(pm), [9, 0, 15, 2]);
+  assert.equal(s.stats().avgWaiting, 6.5);
+});
+
+test('SJF does not preempt on a tie in remaining time', () => {
+  const { e, pm } = setup({ schedulingAlgorithm: 'SJF' });
+  add(pm, [4, 3], { arr: [0, 1] }); runAll(e, pm);
+  assert.deepEqual(e.state.gantt.map((g) => [g.pid, g.start, g.end]), [['P001', 0, 4], ['P002', 4, 7]]);
+});
+
+test('Priority is preemptive: a higher-priority arrival takes the CPU', () => {
+  const { e, pm, s } = setup({ schedulingAlgorithm: 'PRIORITY' });
+  add(pm, [6, 3, 4], { pri: [3, 1, 2], arr: [0, 2, 3] }); runAll(e, pm);
+  assert.deepEqual(e.state.gantt.map((g) => [g.pid, g.start, g.end]),
+    [['P001', 0, 2], ['P002', 2, 5], ['P003', 5, 9], ['P001', 9, 13]]);
+  assert.deepEqual(wait(pm), [7, 0, 2]);
+  assert.ok(e.state.events.some((ev) => ev.type === 'CPU_PREEMPT' && /P001 preempted by P002/.test(ev.message)));
+});
+
+test('Priority does not preempt for an equal priority', () => {
+  const { e, pm } = setup({ schedulingAlgorithm: 'PRIORITY' });
+  add(pm, [4, 2], { pri: [2, 2], arr: [0, 1] }); runAll(e, pm);
+  assert.deepEqual(e.state.gantt.map((g) => [g.pid, g.start, g.end]), [['P001', 0, 4], ['P002', 4, 6]]);
+});

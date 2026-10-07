@@ -3,7 +3,9 @@ import { CPU } from './CPU.js';
 /**
  * Pluggable algorithms. select(queue, get) returns the PID to run next.
  * `queue` is the ready queue in arrival-into-READY order; ties go to the earliest entry.
- * Lower priority number = higher priority. SJF and Priority are NON-preemptive.
+ * Lower priority number = higher priority.
+ * SJF (shortest remaining time first) and Priority are PREEMPTIVE: `key(process)` is the value being minimised, and a
+ * ready process whose key is strictly smaller than the running one's takes the CPU immediately.
  */
 const minBy = (queue, get, key) => {
   let best = null;
@@ -13,10 +15,14 @@ const minBy = (queue, get, key) => {
 export const ALGORITHMS = {
   FCFS: { label: 'First-Come, First-Served', usesQuantum: false, select: (q) => q[0] ?? null,
     description: 'Processes run in the order they became ready. Simple, but short jobs can wait behind long ones (convoy effect).' },
-  SJF: { label: 'Shortest Job First (non-preemptive)', usesQuantum: false, select: (q, get) => minBy(q, get, (p) => p.remainingTime),
-    description: 'The ready process with the smallest burst time runs next, to completion. Minimises average waiting time but can starve long jobs.' },
-  PRIORITY: { label: 'Priority (non-preemptive)', usesQuantum: false, select: (q, get) => minBy(q, get, (p) => p.priority),
-    description: 'The ready process with the highest priority runs next. Here a LOWER number means HIGHER priority. Low-priority jobs can starve.' },
+  SJF: { label: 'Shortest Job First (preemptive, SRTF)', usesQuantum: false, preemptive: true,
+    key: (p) => p.remainingTime, why: 'shorter remaining time',
+    select: (q, get) => minBy(q, get, (p) => p.remainingTime),
+    description: 'Shortest Remaining Time First: the ready process with the least time left runs. If a newly ready process has less time left than the running one, it preempts it. Minimises average waiting time but can starve long jobs.' },
+  PRIORITY: { label: 'Priority (preemptive)', usesQuantum: false, preemptive: true,
+    key: (p) => p.priority, why: 'higher priority',
+    select: (q, get) => minBy(q, get, (p) => p.priority),
+    description: 'The ready process with the highest priority runs. Here a LOWER number means HIGHER priority. If a higher-priority process becomes ready, it preempts the running one. Low-priority jobs can starve.' },
   RR: { label: 'Round Robin', usesQuantum: true, select: (q) => q[0] ?? null,
     description: 'Each process gets at most one time quantum, then goes to the back of the queue. Fair and responsive; the quantum controls the trade-off with context switching.' },
 };
@@ -81,6 +87,16 @@ export class Scheduler {
     const t = state.clock, get = (pid) => this.pm.get(pid), algo = this.algorithm, cpu = state.cpu;
     this._wake(t);
     this._reconcile();
+    // 0. preemption (SRTF / preemptive priority): a strictly better ready process takes the CPU from the running one
+    if (cpu.current && algo.preemptive) {
+      this._prune();
+      const running = get(cpu.current), cand = algo.select(state.readyQueue, get);
+      if (cand && algo.key(get(cand)) < algo.key(running)) {
+        this.engine.log('CPU_PREEMPT', `${running.pid} preempted by ${cand} (${algo.why})`, { pid: running.pid });
+        this.pm.transition(running.pid, 'READY');
+        cpu.release();
+      }
+    }
     // 1. dispatch
     this._prune();
     if (!cpu.current) {

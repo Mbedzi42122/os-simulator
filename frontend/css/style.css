@@ -107,3 +107,33 @@ table.ptab tr.cur{background:#fff3c4}table.ptab tr.cur.good{background:#d4f3dc}t
 .viz-fx{position:absolute;left:0;top:0;width:0;height:0;pointer-events:none;z-index:30}
 .vtoken{position:absolute;white-space:nowrap;color:#fff;font:700 13px system-ui;padding:9px 14px;border-radius:9px;box-shadow:0 6px 18px #0004;border:2px solid #fff}.vtoken.small{font-size:11px;padding:5px 10px;border-radius:99px}.vtoken.dirty{outline:3px solid #b3261e}
 @media(max-width:1100px){.viz-grid{grid-template-columns:1fr;grid-template-areas:"cpu" "addr" "pt" "mm" "sec" "story";gap:18px}.viz-stage{padding-left:4px}.viz-svg{display:none}}
+
+/* Memory page: paging visuals */
+.frame.free{background:#eefaf0;border:1px dashed #6bbf86;color:#2d7a47}
+.legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;margin:4px 0 10px}
+.legend i{display:inline-block;width:14px;height:14px;border-radius:3px;vertical-align:-2px;margin-right:5px}
+.lg-ram{background:#4e79a7}.lg-free{background:#eefaf0;border:1px dashed #6bbf86}.lg-disk{background:#fff1c9;border:1px solid #e0b94a}
+.flist{display:flex;gap:6px;flex-wrap:wrap}.badge.fl-free{background:#eefaf0;color:#2d7a47;border:1px dashed #6bbf86}
+.calc{margin-top:10px;padding:8px 12px;background:#f2f5fb;border-radius:6px;font-size:13px}
+.alloc{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;margin-top:12px}
+.alloc-row{padding:2px 10px;margin-top:2px;border-left:4px solid}
+.alloc-row.ram{border-color:#2f9e5b;background:#eaf7ee}.alloc-row.disk{border-color:#e0b94a;background:#fff6dc;color:#8a6200}
+table.pt tr.pt-ram td{background:#eaf7ee}table.pt tr.pt-disk td{background:#fff6dc;color:#8a6200}
+
+/* Event log: severity colours and download */
+.log div.ev-danger{background:#fdecea;color:#b3261e;border-left:4px solid #d93025;padding-left:8px;font-weight:600}
+.log div.ev-warn{background:#fff6dc;color:#8a6200;border-left:4px solid #e0a800;padding-left:8px}
+.log div.ev-ok{background:#eaf7ee;color:#1e7b45;border-left:4px solid #2f9e5b;padding-left:8px}
+.ev-icon{display:inline-block;width:1.4em}
+.badge.ev-danger{background:#d93025;color:#fff}.badge.ev-warn{background:#e0a800;color:#fff}
+button:disabled{opacity:.5;cursor:not-allowed}
+
+/* Settings page */
+.ok-note{background:#eaf7ee;border-left:4px solid #2f9e5b;color:#1e7b45;padding:8px 12px;border-radius:6px;margin-bottom:12px;font-weight:600}
+label.check{display:flex;gap:8px;align-items:flex-start;margin-top:10px;font-size:13px}label.check input{width:auto;margin-top:2px}
+input[type=file]{padding:5px}
+
+/* Dark theme: the page is inverted, then the parts that are already dark are inverted back */
+html[data-theme="dark"]{background:#0b0e14}
+html[data-theme="dark"] body{filter:invert(1) hue-rotate(180deg)}
+html[data-theme="dark"] .sidebar,html[data-theme="dark"] .vz-cpu{filter:invert(1) hue-rotate(180deg)}

@@ -107,6 +107,35 @@ export class MemoryManager {
     if (rebuild) this.mem.frames = buildFrames(ms, ps);
   }
 
+  /**
+   * Check RAM, page size and virtual memory size TOGETHER (they depend on each other, so changing them one at a
+   * time can fail in either order). Returns a list of problems; an empty list means the combination is valid.
+   */
+  checkConfig(ms, ps, vms) {
+    const c = this.state.config, errs = [], whole = (n) => Number.isInteger(n) && n > 0;
+    if (!whole(ms) || !whole(ps) || !whole(vms)) return ['Physical memory, page size and virtual memory size must be whole numbers greater than zero.'];
+    if (ps > ms || ms % ps) errs.push('Physical memory must be a whole multiple of the page size.');
+    else if (ms / ps > 256) errs.push('At most 256 frames are supported (RAM / page size).');
+    if (ms > vms) errs.push(`Physical memory cannot exceed the virtual memory size (${vms} KB).`);
+    if (vms % ps) errs.push(`The virtual memory size must be a multiple of the page size (${ps} KB).`);
+    const used = this.allocatedPages() * c.pageSize;
+    if (vms < used) errs.push(`${used} KB of virtual memory is already in use.`);
+    if ((ms !== c.memorySize || ps !== c.pageSize) && this.frames.some((f) => f.pid !== null))
+      errs.push('Physical memory and page size can only change while no pages are loaded (terminate the processes or reset first).');
+    if (ps !== c.pageSize && this.state.processes.some((q) => q.state !== 'TERMINATED'))
+      errs.push('Page size can only change while no live processes exist, because processes are divided into pages when they are created.');
+    return errs;
+  }
+
+  /** Apply RAM, page size and virtual memory size in one step (see checkConfig). */
+  applyConfig(ms, ps, vms) {
+    const errs = this.checkConfig(ms, ps, vms), c = this.state.config;
+    if (errs.length) throw new Error(errs.join(' '));
+    const rebuild = ms !== c.memorySize || ps !== c.pageSize;
+    this.engine.updateConfig({ memorySize: ms, pageSize: ps, virtualMemorySize: vms });
+    if (rebuild) this.mem.frames = buildFrames(ms, ps);
+  }
+
   stats() {
     const ps = this.pageSize, frames = this.frames, total = frames.length;
     const used = frames.filter((f) => f.pid !== null).length;
