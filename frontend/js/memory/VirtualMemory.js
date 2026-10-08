@@ -1,10 +1,12 @@
 export const REPLACEMENT_ALGORITHMS = {
   FIFO: { label: 'FIFO', description: 'Evict the page that has been in memory the longest. Simple, but can suffer Belady\'s anomaly (more frames → more faults).' },
   LRU: { label: 'LRU', description: 'Evict the page that has not been used for the longest time. Good approximation of the optimal policy.' },
-  OPTIMAL: { label: 'Optimal', description: 'Evict the page whose next use is farthest in the future. Needs knowledge of the future, so it is a benchmark rather than a real policy.' },
+  OPTIMAL: { label: 'Optimal', description: 'Evict the page whose next use is farthest in the future (or that is never used again). Needs knowledge of the future, so a real OS cannot do it: here it can, because every process\'s page references come from a deterministic stream that the simulator looks ahead in. It is the benchmark that gives the fewest possible page faults.' },
 };
-/** Policies that can run on the live system (Optimal needs the future, so it is only available in the lab). */
-export const LIVE_ALGORITHMS = ['FIFO', 'LRU'];
+/** Policies that can run on the live system. Optimal works live because the simulator can read ahead in each process's reference stream. */
+export const LIVE_ALGORITHMS = ['FIFO', 'LRU', 'OPTIMAL'];
+/** How many future references of one process Optimal looks at (a process never runs more instructions than its burst time). */
+const LOOKAHEAD_LIMIT = 1000;
 
 export function parseReferenceString(text) {
   const parts = String(text ?? '').split(/[\s,]+/).filter(Boolean);
@@ -62,7 +64,7 @@ function rand(p) {
  *    A process is admitted (page table created, nothing loaded) only if its pages fit.
  *  - Every executed instruction references one page of the process (reference stream with locality).
  *    A reference to a page that is not in a frame is a PAGE FAULT: the page is brought into a free frame,
- *    or, if none is free, a victim chosen by the replacement algorithm (FIFO / LRU, global scope) is evicted.
+ *    or, if none is free, a victim chosen by the replacement algorithm (FIFO / LRU / Optimal, global scope) is evicted.
  *  - The faulting process blocks (WAITING) for config.pageFaultTime ticks (the Scheduler does this) and
  *    retries the same reference afterwards.
  *  - Optional RaidManager: the backing store is a RAID array. The address space is limited by the array's usable
@@ -119,23 +121,64 @@ export class VirtualMemory {
 
   // Demand paging -----------------------------------------------------------------
   /** Next page the process touches: mostly the same page, often the next one, sometimes a jump. */
-  nextPage(p) {
+  nextPage(p) {                                 // also called on a copy of the stream (see _futureUse)
     const r = rand(p);
     if (r < 0.6) return p.lastPage;
     if (r < 0.85) return (p.lastPage = (p.lastPage + 1) % p.pages);
     return (p.lastPage = Math.floor(rand(p) * p.pages));
   }
 
+  /**
+   * OPTIMAL: for every page of the process, how many of the process's OWN future references come before its first use
+   * (0 = the very next one). Pages that are not used again before the process finishes are absent from the map.
+   * The future is read from a copy of the process's random stream, so the real stream is not disturbed.
+   * A page waiting for a retry (pendingPage) is the first future reference; at most `remainingTime` references remain.
+   */
+  _futureUse(p) {
+    const next = new Map(), horizon = Math.min(p.remainingTime, LOOKAHEAD_LIMIT);
+    const shadow = { rng: p.rng, lastPage: p.lastPage, pages: p.pages };
+    for (let i = 0; i < horizon; i++) {
+      const page = i === 0 && p.pendingPage !== null ? p.pendingPage : this.nextPage(shadow);
+      if (!next.has(page)) next.set(page, i);
+    }
+    return next;
+  }
+  _nextUse() {
+    const cache = new Map();   // pid → Map(page → distance)
+    return this.mm.frames.map((f) => {
+      if (f.pid === null) return Infinity;
+      if (!cache.has(f.pid)) { const p = this.pm.get(f.pid); cache.set(f.pid, p ? this._futureUse(p) : new Map()); }
+      const d = cache.get(f.pid).get(f.page);
+      return d === undefined ? Infinity : d;
+    });
+  }
+  _policyKey() {
+    const a = this.state.config.replacementAlgorithm;
+    return a === 'LRU' ? 'usedAt' : a === 'OPTIMAL' ? 'nextUse' : 'loadedAt';
+  }
   _victim() {
-    const key = this.state.config.replacementAlgorithm === 'LRU' ? 'usedAt' : 'loadedAt';
+    const frames = this.mm.frames;
     let best = 0;
-    this.mm.frames.forEach((f, i) => { if (f[key] < this.mm.frames[best][key]) best = i; }); // ties → lowest frame
+    if (this.state.config.replacementAlgorithm === 'OPTIMAL') {
+      const use = this._nextUse();
+      use.forEach((d, i) => { if (d > use[best]) best = i; });                        // farthest next use wins; ties → lowest frame
+      return best;
+    }
+    const key = this._policyKey();
+    frames.forEach((f, i) => { if (f[key] < frames[best][key]) best = i; });            // ties → lowest frame
     return best;
   }
-  /** What the replacement algorithm looked at: every frame with the number it compares (smallest wins). */
+  /** What the replacement algorithm looked at: every frame with the number it compares (FIFO/LRU: smallest wins, Optimal: largest wins). */
   _selection(chosen) {
-    const key = this.state.config.replacementAlgorithm === 'LRU' ? 'usedAt' : 'loadedAt';
-    return { frame: chosen, policy: this.state.config.replacementAlgorithm, keyName: key === 'usedAt' ? 'last used' : 'loaded',
+    const policy = this.state.config.replacementAlgorithm;
+    if (policy === 'OPTIMAL') {
+      const use = this._nextUse();
+      return { frame: chosen, policy, keyName: 'next use', pick: 'largest',
+        candidates: this.mm.frames.map((f, i) => ({ frame: i, pid: f.pid, page: f.page, key: use[i] === Infinity ? null : use[i],
+          label: use[i] === Infinity ? 'never used again' : use[i] === 0 ? 'used next' : `used in ${use[i] + 1} refs` })) };
+    }
+    const key = this._policyKey();
+    return { frame: chosen, policy, keyName: key === 'usedAt' ? 'last used' : 'loaded', pick: 'smallest',
       candidates: this.mm.frames.map((f, i) => ({ frame: i, pid: f.pid, page: f.page, key: f[key] })) };
   }
 
@@ -217,7 +260,7 @@ export class VirtualMemory {
 
   configure(patch) {
     const c = this.state.config, errs = [];
-    if ('replacementAlgorithm' in patch && !LIVE_ALGORITHMS.includes(patch.replacementAlgorithm)) errs.push('Choose FIFO or LRU (Optimal needs the future, so it is only available in the lab).');
+    if ('replacementAlgorithm' in patch && !LIVE_ALGORITHMS.includes(patch.replacementAlgorithm)) errs.push('Choose FIFO, LRU or Optimal as the page replacement algorithm.');
     if ('pageFaultTime' in patch && !(Number.isInteger(patch.pageFaultTime) && patch.pageFaultTime >= 1 && patch.pageFaultTime <= 10)) errs.push('Page fault service time must be a whole number of ticks from 1 to 10.');
     if ('virtualMemorySize' in patch) {
       const n = patch.virtualMemorySize;

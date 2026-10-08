@@ -161,7 +161,7 @@ function validateSettings(s) {
   if (!SPEEDS.includes(s.speed)) errs.push(`Speed must be one of ${SPEEDS.join(', ')}x.`);
   if (!ALGORITHMS[s.schedulingAlgorithm]) errs.push('Unknown CPU scheduling algorithm.');
   if (!(int(s.timeQuantum) && s.timeQuantum > 0)) errs.push('Time quantum must be a whole number greater than zero.');
-  if (!LIVE_ALGORITHMS.includes(s.replacementAlgorithm)) errs.push('Page replacement algorithm must be FIFO or LRU.');
+  if (!LIVE_ALGORITHMS.includes(s.replacementAlgorithm)) errs.push('Page replacement algorithm must be FIFO, LRU or Optimal.');
   if (!(int(s.pageFaultTime) && s.pageFaultTime >= 1 && s.pageFaultTime <= 10)) errs.push('Page fault service time must be a whole number of ticks from 1 to 10.');
   errs.push(...mm.checkConfig(s.memorySize, s.pageSize, s.virtualMemorySize));
   return errs;
@@ -221,7 +221,7 @@ function settingsPage() {
      <div><label>Virtual memory size (KB)</label><input name="virtualMemorySize" type="number" value="${s.virtualMemorySize}"></div></div>
      <div class="calc">Currently ${s.memorySize} KB / ${s.pageSize} KB = <b>${frames} frames</b></div></div>
     <div class="card"><h2>Virtual memory</h2><div class="fields">
-     <div><label>Page replacement</label>${sel('replacementAlgorithm', LIVE_ALGORITHMS.map((a) => [a, a]), s.replacementAlgorithm)}</div>
+     <div><label>Page replacement</label>${sel('replacementAlgorithm', LIVE_ALGORITHMS.map((a) => [a, REPLACEMENT_ALGORITHMS[a].label]), s.replacementAlgorithm)}</div>
      <div><label>Page fault service time (ticks, 1–10)</label><input name="pageFaultTime" type="number" value="${s.pageFaultTime}"></div></div></div>
    </div>
    <div class="row"><button class="primary">Apply settings</button><span class="empty" style="padding:0">RAID: ${RAID_LEVELS[s.raid.level].label}, ${s.raid.disks} disks × ${s.raid.capacity} blocks (change it on the RAID page; it is included in export / import).</span></div>

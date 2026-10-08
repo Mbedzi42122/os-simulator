@@ -125,7 +125,8 @@ test('memory configuration: validation, rebuild of frames, and limits while in u
 
 test('virtual memory configuration is validated', () => {
   const { pm, vm } = setup();
-  assert.throws(() => vm.configure({ replacementAlgorithm: 'OPTIMAL' }));
+  assert.throws(() => vm.configure({ replacementAlgorithm: 'MRU' }));          // unknown algorithm
+  vm.configure({ replacementAlgorithm: 'OPTIMAL' });                        // Optimal is a live algorithm
   assert.throws(() => vm.configure({ pageFaultTime: 0 }));
   assert.throws(() => vm.configure({ virtualMemorySize: 30 }));          // not a multiple of the page size
   assert.throws(() => vm.configure({ virtualMemorySize: 16 }));          // smaller than physical memory
@@ -172,4 +173,54 @@ test('page size cannot change while a live process exists', async () => {
   pm.create({ name: 'a', burstTime: 3, priority: 1, memoryRequired: 8, arrivalTime: 0 });
   assert.ok(mm.checkConfig(32, 8, 128).some((m) => /no live processes/.test(m)));
   assert.deepEqual(mm.checkConfig(64, 4, 256).length, 0);                // RAM / virtual size may change, page size stays
+});
+
+test('OPTIMAL (live) evicts the page whose next use is farthest away, or that is never used again', () => {
+  const { pm, mm, vm } = setup({ replacementAlgorithm: 'OPTIMAL' });
+  const p = pm.create({ name: 'p', burstTime: 5, priority: 1, memoryRequired: 36, arrivalTime: 0 });   // 9 pages, 8 frames
+  for (let pg = 0; pg < 8; pg++) { p.pendingPage = null; vm.reference(p, pg); }                       // frames 0..7 hold p0..p7
+  // the process will reference 8, 3, 2, 1, 0 (its 5 remaining instructions): p4..p7 are never used again
+  const script = [8, 3, 2, 1, 0]; p.lastPage = 0;
+  vm.nextPage = (o) => script[o.lastPage++];          // the stream position lives on the object, so a look-ahead copy cannot disturb it
+  p.pendingPage = null;
+  const r = vm.reference(p);                              // reference 8 -> fault, memory is full
+  assert.equal(r.fault, true);
+  assert.equal(r.evicted.page, 4);                        // never used again; ties -> lowest frame
+  assert.equal(r.frame, 4);
+  assert.equal(p.lastPage, 1);                            // looking ahead did not consume the real stream
+});
+
+test('OPTIMAL (live) picks the page used last when every page is used again', () => {
+  const { pm, vm } = setup({ replacementAlgorithm: 'OPTIMAL' });
+  const p = pm.create({ name: 'p', burstTime: 20, priority: 1, memoryRequired: 36, arrivalTime: 0 });
+  for (let pg = 0; pg < 8; pg++) { p.pendingPage = null; vm.reference(p, pg); }
+  p.remainingTime = 9;
+  const script = [8, 0, 1, 2, 3, 4, 5, 6, 7]; p.lastPage = 0;   // p7 is needed last
+  vm.nextPage = (o) => script[o.lastPage++];
+  p.pendingPage = null;
+  const r = vm.reference(p);
+  assert.equal(r.evicted.page, 7);
+  const v = vm.vm.trace[vm.vm.trace.length - 1].victim;
+  assert.equal(v.policy, 'OPTIMAL'); assert.equal(v.pick, 'largest');
+  assert.equal(v.candidates.find((c) => c.page === 7).key, 8);   // 8 references before p7 is used
+});
+
+test('OPTIMAL (live) never causes more page faults than FIFO or LRU on the same workload', () => {
+  const run = (alg) => {
+    const { e, pm, vm } = setup({ replacementAlgorithm: alg, memorySize: 16, virtualMemorySize: 128 });
+    pm.create({ name: 'a', burstTime: 40, priority: 1, memoryRequired: 32, arrivalTime: 0 });
+    pm.create({ name: 'b', burstTime: 40, priority: 1, memoryRequired: 28, arrivalTime: 0 });
+    const ps = pm.list;
+    // execute every instruction of every process one after the other (round robin by hand, no scheduler needed)
+    for (let step = 0; step < 400 && ps.some((q) => q.remainingTime > 0); step++) {
+      for (const q of ps) {
+        if (q.remainingTime <= 0) continue;
+        const r = vm.reference(q);
+        if (!r.fault) { q.remainingTime--; q.cpuTimeUsed++; }
+      }
+    }
+    return vm.stats().faults;
+  };
+  const [f, l, o] = [run('FIFO'), run('LRU'), run('OPTIMAL')];
+  assert.ok(o <= f && o <= l, `optimal ${o}, fifo ${f}, lru ${l}`);
 });

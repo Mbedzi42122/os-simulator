@@ -35,7 +35,7 @@ export function buildSteps(rec) {
   }
   if (rec.victim) {
     const v = rec.evicted;
-    steps.push(S('victim', 'No free frame: select a victim', `Main memory is full. ${rec.victim.policy} compares the "${rec.victim.keyName}" number of every frame and picks the smallest: Frame ${rec.victim.frame} (${v.pid} page ${v.page}).`, 1500),
+    steps.push(S('victim', 'No free frame: select a victim', `Main memory is full. ${rec.victim.policy} compares the "${rec.victim.keyName}" ${rec.victim.pick === 'largest' ? 'of every frame (it looks ahead at the future references) and picks the page used farthest in the future, or never again:' : 'number of every frame and picks the smallest:'} Frame ${rec.victim.frame} (${v.pid} page ${v.page}).`, 1500),
       S('evict', `Evict ${v.pid} page ${v.page}`, `${v.pid} page ${v.page} leaves Frame ${rec.victim.frame} and goes back to secondary memory${v.dirty ? ' (it was MODIFIED, so it is written back to disk first)' : ' (unmodified: the disk copy is still valid, nothing to write)'}. Its page table entry becomes NOT PRESENT.`, 1200));
   }
   const where = rec.io && rec.io.lb !== null && rec.io.lb !== undefined ? ` Block ${rec.io.label} on Disk ${rec.io.disk + 1}${rec.io.reconstructed ? ' is on a failed disk: rebuilt from the surviving disks' : ''}.` : '';
@@ -342,7 +342,7 @@ export class Visualizer {
     let victim = '';
     if (hl.showVictim && r && r.victim) {
       const v = r.victim, cands = v.candidates.filter((c) => c.pid);
-      victim = `<div class="vsel"><b>Victim selection (${v.policy})</b><small> – smallest "${v.keyName}" number is evicted</small><table><tbody>${cands.map((c) => `<tr class="${c.frame === v.frame ? 'chosen' : ''}"><td>Frame ${c.frame}</td><td><span class="pdot" style="background:${this.colour(c.pid)}"></span>${c.pid} p${c.page}</td><td>${v.keyName} #${c.key}</td><td>${c.frame === v.frame ? '◀ victim' : ''}</td></tr>`).join('')}</tbody></table></div>`;
+      victim = `<div class="vsel"><b>Victim selection (${v.policy})</b><small> – ${v.pick === 'largest' ? 'the page whose next use is farthest away (or never) is evicted' : `smallest "${v.keyName}" number is evicted`}</small><table><tbody>${cands.map((c) => `<tr class="${c.frame === v.frame ? 'chosen' : ''}"><td>Frame ${c.frame}</td><td><span class="pdot" style="background:${this.colour(c.pid)}"></span>${c.pid} p${c.page}</td><td>${c.label ?? `${v.keyName} #${c.key}`}</td><td>${c.frame === v.frame ? '◀ victim' : ''}</td></tr>`).join('')}</tbody></table></div>`;
     }
     const list = this.steps.length ? `<ol class="steps">${this.steps.map((s) => `<li class="${s.state}"><b>${this.esc(s.title)}</b></li>`).join('')}</ol>` : '<div class="empty" style="padding:10px">The sequence of the current memory access appears here once the simulation runs.</div>';
     el.className = 'vz vz-story';
