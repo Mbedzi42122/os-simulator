@@ -1,3 +1,4 @@
+import { SimulationClock } from '../simulation/SimulationClock.js';
 /**
  * Visualization module: shows how a process, its virtual memory (pages kept in secondary memory), the page table,
  * main memory (frames) and the CPU interact - and animates pages moving between them.
@@ -56,17 +57,24 @@ export class Visualizer {
    */
   constructor(engine, deps) {
     Object.assign(this, { engine, ...deps });
-    this.root = null; this.active = false; this.animate = true; this.detail = 'all'; this.speed = 1; this.sync = true;
+    this.root = null; this.active = false; this.animate = true; this.detail = 'all'; this.sync = true;
+    this.frozen = false; this.anims = new Set(); this._prevStatus = engine.state.status; this._lastSpeed = engine.state.speed;
     this.queue = []; this.playing = false; this.epoch = 0; this.banner = null; this.lastSeq = 0; this.held = false;
     this.evicted = new Set(); this.hl = {}; this.steps = []; this.rec = null; this.sel = null; this.focus = 'auto';
     this.cpuView = null; this.addr = null; this.note = ''; this.catchingUp = false;
     engine.bus.on('STATE_CHANGED', () => this.onChange());
+    // Step while paused moves a frozen animation forward again (nothing else would, because the clock is not running).
+    engine.bus.on('TICK', () => { if (this.frozen && !this.engine.running) this._thaw(); });
   }
   get state() { return this.engine.state; }
+  /** The animation runs at the simulation speed: 2x simulation = 2x animation (there is no separate animation speed). */
+  get speed() { return this.state.speed || 1; }
+  get paused() { return this.frozen; }
   get pageBytes() { return this.state.config.pageSize * 1024; }
 
   // Records -------------------------------------------------------------------------------------------
   onChange() {
+    this._followSimulation();
     const vm = this.state.virtualMemory;
     if (vm.refSeq < this.lastSeq) this._reset();                 // simulation was reset
     const fresh = vm.trace.filter((r) => r.seq > this.lastSeq);
@@ -79,7 +87,23 @@ export class Visualizer {
       this._run();
     } else if (this.active && !this.playing) this.draw();
   }
-  _reset() { this.epoch++; this.queue = []; this.playing = false; this.lastSeq = 0; this.evicted.clear(); this.hl = {}; this.steps = []; this.rec = null; this.cpuView = null; this.addr = null; this.sel = null; this._release(); }
+  /** Pause / Resume / speed changes of the simulation also pause, resume and re-time the animation in progress. */
+  _followSimulation() {
+    const st = this.state.status;
+    if (st === 'PAUSED' && this._prevStatus === 'RUNNING' && this.playing && !this.frozen) this._freeze();
+    else if (this.frozen && st !== 'PAUSED') this._thaw();
+    this._prevStatus = st;
+    if (this.state.speed !== this._lastSpeed) { this._lastSpeed = this.state.speed; for (const a of this.anims) a.playbackRate = this.speed / a._base; }
+  }
+  _freeze() { this.frozen = true; for (const a of this.anims) a.pause(); this.draw(); }
+  _thaw() {
+    this.frozen = false;
+    for (const a of this.anims) a.play();
+    if (this.held) this.engine.holdClock();      // Resume restarts the engine timer: keep the clock held until the animation ends
+    this.draw();
+  }
+  _stopAnims() { for (const a of [...this.anims]) a.cancel(); this.anims.clear(); }
+  _reset() { this.frozen = false; this._stopAnims(); this.epoch++; this.queue = []; this.playing = false; this.lastSeq = 0; this.evicted.clear(); this.hl = {}; this.steps = []; this.rec = null; this.cpuView = null; this.addr = null; this.sel = null; this._release(); }
   _release() { if (this.held) { this.held = false; this.engine.releaseClock(); } }
 
   /** Apply a record without telling the story (page hidden, animation off, or catching up). */
@@ -99,7 +123,7 @@ export class Visualizer {
   }
   deactivate() {
     if (!this.active) return;
-    this.active = false; this.epoch++; this.playing = false;
+    this.active = false; this.epoch++; this.playing = false; this.frozen = false; this._stopAnims();
     for (const r of this.queue) this._instant(r);
     this.queue = []; this.hl = {}; this._release();
   }
@@ -123,7 +147,22 @@ export class Visualizer {
     if (ep === this.epoch) { this.playing = false; this.catchingUp = false; this.hl = {}; this._release(); this.draw(); }
   }
 
-  _sleep(ms, ep) { return new Promise((res, rej) => setTimeout(() => (ep === this.epoch ? res() : rej('aborted')), Math.max(0, ms / this.speed))); }
+  /**
+   * Wait `ms` (measured at 1x). Time only passes while the simulation is not paused, and it passes `speed` times
+   * faster at 2x, 5x ... because the animation uses the same speed as the simulation clock.
+   */
+  _sleep(ms, ep) {
+    return new Promise((res, rej) => {
+      let left = Math.max(0, ms), last = performance.now();
+      const timer = setInterval(() => {
+        const now = performance.now(), dt = now - last; last = now;
+        if (ep !== this.epoch) { clearInterval(timer); rej('aborted'); return; }
+        if (this.frozen) return;
+        left -= dt * this.speed;
+        if (left <= 0) { clearInterval(timer); res(); }
+      }, 30);
+    });
+  }
 
   async _play(rec, ep) {
     this.rec = rec;
@@ -203,7 +242,11 @@ export class Visualizer {
       { transform: `translate(${dx}px,${dy}px) scale(1)`, opacity: 1, offset: 0.88 },
       { transform: `translate(${dx}px,${dy}px) scale(.85)`, opacity: 0 },
     ], { duration: Math.max(60, ms), easing: 'ease-in-out', fill: 'forwards' });
+    anim._base = this.speed;                                  // ms was already divided by this speed; later speed changes scale the rate
+    this.anims.add(anim);
+    if (this.frozen) anim.pause();
     try { await anim.finished; } catch { /* cancelled */ }
+    this.anims.delete(anim);
     tok.remove();
   }
 
@@ -254,12 +297,12 @@ export class Visualizer {
   mount(root) {
     this.root = root;
     root.innerHTML = `
-    <div class="info"><b>How to read this screen.</b> A process is split into <i>pages</i> that live in <b>virtual memory</b>, which is stored in <b>secondary memory</b> (the RAID array). The CPU asks the <b>page table</b> where a page is: if it is <i>present</i> it sits in a <b>frame</b> of <b>main memory</b>; if not, a <b>page fault</b> makes the OS bring the page in (evicting a victim if every frame is taken). Press <b>Start</b> or <b>Step</b> at the top, or click a page in virtual memory and use <i>CPU requests this page</i>.</div>
+    <div class="info"><b>How to read this screen.</b> A process is split into <i>pages</i> that live in <b>virtual memory</b>, which is stored in <b>secondary memory</b> (the RAID array). The CPU asks the <b>page table</b> where a page is: if it is <i>present</i> it sits in a <b>frame</b> of <b>main memory</b>; if not, a <b>page fault</b> makes the OS bring the page in (evicting a victim if every frame is taken). Press <b>Start</b> or <b>Step</b> at the top (the animation uses the simulation clock and speed: <b>Pause</b> freezes it, <b>Resume</b> continues it, <b>Step</b> plays it forward one tick at a time), or click a page in virtual memory and use <i>CPU requests this page</i>.</div>
     <div class="card viz-bar">
       <label>Animate <select id="vz-detail"><option value="all">every memory access</option><option value="faults">page faults only</option><option value="off">off</option></select></label>
-      <label>Animation speed <select id="vz-speed"><option value="0.5">0.5x</option><option value="1" selected>1x</option><option value="2">2x</option><option value="4">4x</option></select></label>
+      <span id="vz-clock" class="vz-clock"></span>
       <label>Page table of <select id="vz-proc"></select></label>
-      <label class="chk"><input type="checkbox" id="vz-sync" checked> Hold the clock while an animation plays</label>
+      <label class="chk"><input type="checkbox" id="vz-sync" checked> Hold the simulation clock while an animation plays</label>
       <span id="vz-note" class="vz-note"></span></div>
     <div class="viz-stage" id="vz-stage">
       <div class="viz-grid">
@@ -272,7 +315,6 @@ export class Visualizer {
     root.addEventListener('change', (e) => {
       const t = e.target;
       if (t.id === 'vz-detail') this.detail = t.value;
-      if (t.id === 'vz-speed') this.speed = Number(t.value);
       if (t.id === 'vz-sync') { this.sync = t.checked; if (!this.sync) this._release(); }
       if (t.id === 'vz-proc') this.focus = t.value;
       this.draw();
@@ -292,7 +334,9 @@ export class Visualizer {
     if (!this.root || !this.active || !this.stage) return;
     for (const k of [...this.evicted]) { const [pid] = k.split(':'); if (!this.mm.hasTable(pid)) this.evicted.delete(k); }
     this._cpu(); this._addr(); this._story(); this._pt(); this._mm(); this._sec(); this._detail(); this._procSelect();
-    const n = this.q('#vz-note'); if (n) n.innerHTML = this.note ? `<span style="color:#b3261e">${this.esc(this.note)}</span>` : this.catchingUp ? 'catching up: lower the simulation speed to watch every step' : this.held && this.playing ? 'clock held until the animation ends' : '';
+    const ck = this.q('#vz-clock');
+    if (ck) ck.innerHTML = `<b>Simulation clock</b> ${SimulationClock.format(this.state.clock)} &middot; ${this.state.status} &middot; ${this.state.speed}x`;
+    const n = this.q('#vz-note'); if (n) n.innerHTML = this.frozen ? 'paused: the animation is frozen. Press Resume to continue (or Step to play it forward).' : this.note ? `<span style="color:#b3261e">${this.esc(this.note)}</span>` : this.catchingUp ? 'catching up: lower the simulation speed to watch every step' : this.held && this.playing ? 'clock held until the animation ends' : '';
     this._arrows();
   }
 
@@ -346,7 +390,7 @@ export class Visualizer {
     }
     const list = this.steps.length ? `<ol class="steps">${this.steps.map((s) => `<li class="${s.state}"><b>${this.esc(s.title)}</b></li>`).join('')}</ol>` : '<div class="empty" style="padding:10px">The sequence of the current memory access appears here once the simulation runs.</div>';
     el.className = 'vz vz-story';
-    el.innerHTML = `<h3>What is happening</h3>${banner}${hl.say ? `<div class="say">${this.esc(hl.say)}</div>` : r && !this.playing ? `<div class="say dim">${r.fault ? (r.ioError ? 'Last access: I/O error.' : 'Last access: page fault, served.') : 'Last access: hit.'} (${r.pid}, page ${r.page})</div>` : ''}${list}${victim}`;
+    el.innerHTML = `<h3>What is happening</h3>${banner}${hl.say ? `<div class="say">${this.esc(hl.say)}</div>` : r && !this.playing ? `<div class="say dim">${r.fault ? (r.ioError ? 'Last access: I/O error.' : 'Last access: page fault, served.') : 'Last access: hit.'} (${r.pid}, page ${r.page}) at t=${SimulationClock.format(r.time)}</div>` : ''}${list}${victim}`;
   }
 
   _pt() {

@@ -108,3 +108,6 @@ Synchronisation, Deadlock (with Banker's algorithm), Real-Time and Process Migra
 
 ## Next
 Disk scheduling (FCFS, SSTF, SCAN, C-SCAN, LOOK, C-LOOK) is not built; the Storage entry was removed from the sidebar.
+
+### Visualization follows the simulation clock
+The visualization has **no speed setting of its own**: every step and every flying page token runs at the simulation speed (0.5x - 10x), and changing the speed mid-animation re-times it. **Pause** freezes the animation in progress (tokens stop mid-flight, the note says so), **Resume** continues exactly where it stopped, and **Step** while paused plays the frozen animation forward. **Reset** discards it. The simulation clock, status and speed are shown on the visualization bar and each access is stamped with its tick (`t=hh:mm:ss`). "Hold the simulation clock while an animation plays" still lets a story finish before the next tick; Resume re-applies that hold.

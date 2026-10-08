@@ -196,3 +196,62 @@ test('a simulation reset clears the visualisation state', () => {
   assert.equal(viz.lastSeq, 0);
   assert.equal(viz.cpuView, null);
 });
+
+// --- the animation follows the simulation clock: speed, Pause and Resume ----------------------------------
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+const doneSteps = (viz) => viz.steps.filter((s) => s.state === 'done').length;
+function liveViz(speed) {
+  const sys = system();
+  sys.e.setSpeed(speed);
+  sys.viz.active = true; sys.viz.root = { querySelector: () => null };      // no DOM here: drawing is a no-op, timing still runs
+  return sys;
+}
+const hitRec = { pid: 'P001', page: 1, instr: 1, write: false, offset: 0, frame: 0, fault: false, evicted: null, victim: null, serviceTime: 2, seq: 1, time: 0 };
+
+test('the animation speed is the simulation speed (there is no separate animation speed)', () => {
+  const { e, viz } = system();
+  assert.equal(viz.speed, 1);
+  e.setSpeed(5); assert.equal(viz.speed, 5);
+  e.setSpeed(0.5); assert.equal(viz.speed, 0.5);
+});
+
+test('Pause freezes the animation in progress and Resume continues it', async () => {
+  const { e, viz } = liveViz(10);
+  e.start();
+  viz.queue.push({ ...hitRec }); viz._run();
+  await wait(200);
+  assert.equal(viz.playing, true);
+  e.pause();
+  assert.equal(viz.frozen, true);
+  const at = doneSteps(viz);
+  await wait(700);                                         // would be enough to finish at 10x if it were not frozen
+  assert.equal(doneSteps(viz), at);
+  assert.equal(viz.playing, true);
+  e.resume();
+  assert.equal(viz.frozen, false);
+  for (let i = 0; i < 60 && viz.playing; i++) await wait(50);
+  assert.equal(viz.playing, false);                        // the story completed after Resume
+  assert.equal(viz.queue.length, 0);
+  e.pause();
+});
+
+test('Step while paused plays a frozen animation forward; Reset throws it away', async () => {
+  const { e, viz } = liveViz(10);
+  e.start();
+  viz.lastSeq = 1; e.state.virtualMemory.refSeq = 1; viz.queue.push({ ...hitRec }); viz._run();     // as if reference #1 had been seen
+  await wait(100);
+  e.pause(); assert.equal(viz.frozen, true);
+  e.step(); assert.equal(viz.frozen, false);
+  e.reset();
+  assert.equal(viz.playing, false); assert.equal(viz.queue.length, 0);
+});
+
+test('a faster simulation plays the same story faster', async () => {
+  const time = async (speed) => {
+    const { e, viz } = liveViz(speed);
+    viz.queue.push({ ...hitRec }); const t0 = Date.now(); await viz._run();
+    return Date.now() - t0;
+  };
+  const slow = await time(5), fast = await time(10);
+  assert.ok(fast < slow * 0.8, `10x took ${fast} ms, 5x took ${slow} ms`);
+});
