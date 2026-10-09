@@ -5,10 +5,11 @@ import { ProcessManager } from './process/ProcessManager.js';
 import { STATES, TRANSITIONS } from './process/Process.js';
 import { Scheduler, ALGORITHMS } from './cpu/Scheduler.js';
 import { MemoryManager } from './memory/MemoryManager.js';
-import { VirtualMemory, REPLACEMENT_ALGORITHMS, LIVE_ALGORITHMS, simulateReplacement } from './memory/VirtualMemory.js';
+import { VirtualMemory, REPLACEMENT_ALGORITHMS, LIVE_ALGORITHMS } from './memory/VirtualMemory.js';
 import { RaidManager } from './raid/RaidManager.js';
 import { Visualizer } from './visualization/Visualizer.js';
-import { RAID_LEVELS, LEVEL_IDS, MAX_DISKS, MAX_CAPACITY, describe } from './raid/RaidLayout.js';
+import { Metrics } from './metrics/Metrics.js';
+import { RAID_LEVELS, LEVEL_IDS, MAX_DISKS, MAX_CAPACITY } from './raid/RaidLayout.js';
 
 const engine = new SimulationEngine();
 const pm = engine.registerModule(new ProcessManager(engine));
@@ -16,6 +17,7 @@ const mm = engine.registerModule(new MemoryManager(engine));
 const raid = engine.registerModule(new RaidManager(engine));      // the disk array that holds the backing store
 const vm = engine.registerModule(new VirtualMemory(engine, pm, mm, raid));
 const sched = engine.registerModule(new Scheduler(engine, pm, vm));
+const metrics = new Metrics(engine, { sched, mm, vm, raid });   // read-only view of every counter, grouped by subsystem
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const PAGES = ['Dashboard', 'Processes', 'CPU & Scheduling', 'Memory', 'Virtual Memory', 'Visualization', 'RAID', 'Event Log', 'Settings'];
@@ -56,18 +58,47 @@ function renderTopbar() {
 }
 
 // Pages ---------------------------------------------------------------------
+/** One metric: label, big value, optional detail line and tooltip. */
+const tile = (label, value, sub = '', tip = '') => `<div class="mtile" title="${esc(tip)}"><div class="mlabel">${label}</div><div class="mval">${value}</div>${sub ? `<div class="msub">${sub}</div>` : ''}</div>`;
+const metricSection = (title, note, tiles) => `<div class="card msec"><h2>${title}<small>${note}</small></h2><div class="mgrid">${tiles.join('')}</div></div>`;
+
 function dashboard() {
-  const c = pm.counts(), s = engine.state;
-  return `<div class="info"><b>What is this?</b> The dashboard summarises the whole simulated system. Everything here is read from the single simulation state.</div>
+  const c = pm.counts(), s = engine.state, m = metrics.snapshot();
+  const pc = (x) => `${x}%`, ticks = (x) => `${x}<span class="munit"> ticks</span>`;
+  return `<div class="info"><b>What is this?</b> The dashboard shows live metrics of the whole simulated system, grouped by subsystem. Every number is read from the single simulation state and refreshes on every tick of the simulation clock and on every event (page fault, disk failure ...). Resetting the simulation sets all counters back to zero.</div>
   <div class="grid">
    <div class="card"><h2>Simulation</h2><div class="big">${SimulationClock.format(s.clock)}</div>Status: ${s.status} · Speed ${s.speed}x</div>
    <div class="card"><h2>Processes</h2><div class="big">${c.total}</div>Running ${c.RUNNING} · Ready ${c.READY} · Waiting ${c.WAITING} · New ${c.NEW} · Terminated ${c.TERMINATED}</div>
-   <div class="card"><h2>CPU</h2><div class="big">${sched.stats().cpuUtilisation}%</div>Running: ${s.cpu.current || 'idle'} · Algorithm ${s.config.schedulingAlgorithm}</div>
-   <div class="card"><h2>Memory (frames)</h2><div class="big">${mm.stats().utilisation}%</div>${mm.stats().used} of ${mm.stats().frames} frames used · ${s.config.memorySize} KB, ${s.config.pageSize} KB pages</div>
-   <div class="card"><h2>Virtual memory</h2><div class="big">${vm.stats().faults}</div>page faults · ${vm.stats().hits} hits · ${vm.stats().replacements} replacements</div>
-   <div class="card"><h2>RAID backing store</h2><div class="big"><span class="rs rs-${raid.status}">${raid.status}</span></div>${raid.stats().label} · ${raid.stats().disks} disks · ${raid.stats().usableKB} KB usable · ${raid.stats().reconstructed} reconstructed page-ins</div>
   </div>
-  <div class="card"><h2>Process state diagram</h2><div class="flow">${badge('NEW')}→${badge('READY')}⇄${badge('RUNNING')}→${badge('TERMINATED')}&nbsp;&nbsp;${badge('RUNNING')}→${badge('WAITING')}→${badge('READY')}</div></div>`;
+  ${metricSection('CPU metrics', `${s.config.schedulingAlgorithm} · running: ${s.cpu.current || 'idle'}`, [
+    tile('CPU utilisation', pc(m.cpu.utilisation), 'busy ticks / elapsed ticks', 'Share of the elapsed simulation ticks in which the CPU executed an instruction'),
+    tile('Average waiting time', ticks(m.cpu.avgWaiting), `${m.cpu.completed} completed process(es)`, 'Time spent in the ready queue, averaged over completed processes'),
+    tile('Average turnaround time', ticks(m.cpu.avgTurnaround), `${m.cpu.completed} completed process(es)`, 'Arrival to completion, averaged over completed processes'),
+    tile('Average response time', ticks(m.cpu.avgResponse), `${m.cpu.completed} completed process(es)`, 'Arrival to first dispatch, averaged over completed processes'),
+  ])}
+  ${metricSection('Memory metrics', `${m.memory.frames} frames · ${s.config.memorySize} KB RAM · ${s.config.pageSize} KB pages`, [
+    tile('Page faults', m.memory.pageFaults, `${m.memory.references} page references`),
+    tile('Page hits', m.memory.pageHits, `${m.memory.references} page references`),
+    tile('Page fault rate', pc(m.memory.faultRate), 'faults / references'),
+    tile('Page hit rate', pc(m.memory.hitRate), 'hits / references'),
+    tile('Page replacements', m.memory.replacements, `${s.config.replacementAlgorithm === 'OPTIMAL' ? 'Optimal' : s.config.replacementAlgorithm} victims evicted`),
+    tile('Memory utilisation', pc(m.memory.utilisation), `${m.memory.framesUsed} of ${m.memory.frames} frames used`),
+  ])}
+  ${metricSection('Virtual memory metrics', `backing store: ${m.raid.label}`, [
+    tile('Pages in RAM', m.virtualMemory.pagesInRam, 'pages sitting in a frame'),
+    tile('Pages on secondary storage', m.virtualMemory.pagesOnSecondary, 'pages that exist only on the disk array'),
+    tile('Page transfer count', m.virtualMemory.transfers, `${m.virtualMemory.swappedIn} swapped in · ${m.virtualMemory.swappedOut} swapped out`, 'Pages moved between secondary storage and RAM, in either direction'),
+    tile('Replacement count', m.virtualMemory.replacements, 'pages evicted to make room'),
+  ])}
+  ${metricSection('RAID metrics', `${m.raid.label} · ${m.raid.disks} disks · <span class="rs rs-${m.raid.status}">${m.raid.status}</span>`, [
+    tile('Read operations', m.raid.reads, 'page-ins read from the array'),
+    tile('Write operations', m.raid.writes, 'modified pages written back', 'A modified (dirty) page that is evicted is written back to its block on the array'),
+    tile('Failed disks', `<span style="color:${m.raid.failedDisks ? '#b3261e' : 'inherit'}">${m.raid.failedDisks}</span>`, `of ${m.raid.disks}${m.raid.rebuildingDisks ? ` · ${m.raid.rebuildingDisks} rebuilding` : ''}`),
+    tile('Recovery operations', m.raid.recoveryOps, `${m.raid.reconstructedReads} blocks rebuilt on read · ${m.raid.rebuilds} disk rebuild(s)`, 'Blocks reconstructed from parity or mirrors while a disk is down, plus completed disk rebuilds'),
+    tile('Storage utilisation', pc(m.raid.storageUtilisation), `${m.raid.blocksUsed} of ${m.raid.blocksTotal} blocks used`),
+    tile('Estimated performance', pc(m.raid.performance), 'vs. a healthy array', '100% = every block is read directly from a healthy disk; a block that must be rebuilt from parity counts as half speed; an unreadable block counts as zero'),
+  ])}
+  <div class="card"><h2>Process state diagram</h2><div class="flow">${badge('NEW')}${badge('READY')}${badge('RUNNING')}${badge('TERMINATED')}&nbsp;&nbsp;${badge('RUNNING')}${badge('WAITING')}${badge('READY')}</div></div>`;
 }
 
 function processes() {
@@ -80,7 +111,7 @@ function processes() {
     <div class="row">${TRANSITIONS[sel.state].map((t) => `<button data-to="${t}">→ ${t}</button>`).join('') || '<span class="empty">Terminal state: no further transitions.</span>'}
     <button class="danger" data-remove>Remove</button></div>
     <table><tbody>${[['Arrival', sel.arrivalTime], ['Burst', sel.burstTime], ['Remaining', sel.remainingTime], ['Priority', sel.priority], ['Memory', sel.memoryRequired + ' KB'], ['Pages', `${sel.pages} (${mm.residentPages(sel.pid)} in memory)`], ['Page faults', sel.pageFaults], ['Page hits', sel.pageHits],
-      ['Parent PID', sel.parentPid ?? '—'], ['CPU time used', sel.cpuTimeUsed], ['Waiting time', sel.waitingTime], ['Turnaround', sel.turnaroundTime],
+      ['CPU time used', sel.cpuTimeUsed], ['Waiting time', sel.waitingTime], ['Turnaround', sel.turnaroundTime],
       ['I/O state', sel.ioState], ...(sel.abortReason ? [['Aborted because', esc(sel.abortReason)]] : []), ['Created at', sel.creationTime], ['Terminated at', sel.terminationTime ?? '—']].map(([k, v]) => `<tr><th>${k}</th><td>${v}</td></tr>`).join('')}</tbody></table></div>` : '';
   return `<div class="info"><b>What is this?</b> A process is a program in execution. It moves through states (NEW, READY, RUNNING, WAITING, SUSPENDED, TERMINATED); only valid transitions are allowed. Priority: <b>lower number = higher priority</b> (0–10). NEW processes become READY once the clock reaches their arrival time. Memory is in KB: a process is divided into pages (page size is set on the Memory page) and its pages are loaded into frames on demand.</div>
   <div class="card"><h2>Create process</h2><form id="pform" class="fields">
@@ -345,6 +376,7 @@ function demandView() {
    <div class="card"><h2>Page faults</h2><div class="big">${st.faults}</div>fault rate ${st.faultRate}</div>
    <div class="card"><h2>Page hits</h2><div class="big">${st.hits}</div>${st.references} references</div>
    <div class="card"><h2>Replacements</h2><div class="big">${st.replacements}</div>pages evicted to make room</div>
+   <div class="card"><h2>Pages transferred</h2><div class="big">${st.pagesTransferred}</div>${st.pagesIn} swapped in · ${st.pagesOut} swapped out</div>
    <div class="card"><h2>Virtual memory used</h2><div class="big">${st.usedPages} / ${st.capacityPages}</div>pages of ${st.capacityPages * c.pageSize} KB (${c.pageSize} KB each)${st.capacityPages * c.pageSize < c.virtualMemorySize ? `<br><small>limited by the RAID array (configured ${c.virtualMemorySize} KB)</small>` : ''}</div>
    <div class="card"><h2>Backing store: ${st.raid.label}</h2><div class="big"><span class="rs rs-${st.raid.status}">${st.raid.status}</span></div>${st.raid.reads} page-ins · ${st.raid.reconstructed} rebuilt from parity (+${st.raid.extraTicks} ticks) · ${st.raid.ioErrors} I/O errors<br><small>Configure it on the RAID page; a failed disk slows or kills page-ins.</small></div></div>
   <div class="card"><h2>Per process</h2>${rows.length ? `<table><thead><tr><th>PID</th><th>Name</th><th>Pages</th><th>In memory</th><th>Faults</th><th>Hits</th><th>Fault rate</th></tr></thead><tbody>${rows.map((r) =>
@@ -354,24 +386,26 @@ function demandView() {
 }
 
 function replacementView() {
-  const v = engine.state.virtualMemory.lab, r = v.result, L = (x) => (v.labels ? v.labels[x] : x);
-  const table = !r ? '<div class="empty">Run a simulation to see the frame-by-frame table.</div>' : `<div style="overflow-x:auto"><table class="vmtable"><tbody>
+  const lab = vm.liveLab(100), c = engine.state.config, A = REPLACEMENT_ALGORITHMS[c.replacementAlgorithm];
+  const intro = `<div class="info"><b>Page replacement lab (live).</b> This lab has no controls of its own: it replays the <b>last ${100} page references</b> recorded by your running processes through FIFO, LRU and Optimal, using the system's real <b>number of frames</b> and the <b>algorithm</b> chosen in the memory settings, and it refreshes with the simulation clock. <b>${A.label}:</b> ${A.description}</div>
+  <div class="card"><h2>Taken from the system settings</h2><div class="row"><span class="badge">Frames: <b>${lab.frames}</b> (${c.memorySize} KB RAM / ${c.pageSize} KB pages)</span><span class="badge">Algorithm: <b>${A.label}</b></span><span class="badge">${lab.empty ? 'no references yet' : `Window: last <b>${lab.count}</b> references (t=${lab.from}&ndash;${lab.to})`}</span></div>
+   <div class="empty" style="padding:6px 0 0;text-align:left">To change the frames or the algorithm, use the Memory page, the Demand paging tab or Settings: this lab follows them automatically.</div></div>`;
+  if (lab.empty) return intro + '<div class="card"><div class="empty">Waiting for page references. Create processes and press Start or Step: every instruction of a running process references a page, and the lab fills in as they arrive.</div></div>';
+  const r = lab.result, L = (x) => lab.labels[x];
+  const table = `<div style="overflow-x:auto"><table class="vmtable"><tbody>
     <tr><th>Ref</th>${r.steps.map((s) => `<td><b>${L(s.ref)}</b></td>`).join('')}</tr>
     ${Array.from({ length: r.frameCount }, (_, f) => `<tr><th>Frame ${f}</th>${r.steps.map((s) => `<td class="${s.slot === f ? 'loaded' : ''}">${s.frames[f] === null || s.frames[f] === undefined ? '' : L(s.frames[f])}</td>`).join('')}</tr>`).join('')}
     <tr><th>Result</th>${r.steps.map((s) => `<td class="${s.fault ? 'fault' : 'hit'}">${s.fault ? 'F' : 'H'}</td>`).join('')}</tr></tbody></table></div>`;
-  const cmp = r ? `<table><thead><tr><th>Algorithm</th><th>Page faults</th><th>Hits</th><th>Hit ratio</th></tr></thead><tbody>${Object.keys(REPLACEMENT_ALGORITHMS).map((k) => {
-    const q = simulateReplacement(v.refs, v.frames, k);
-    return `<tr class="${k === v.algorithm ? 'sel' : ''}"><td>${REPLACEMENT_ALGORITHMS[k].label}</td><td>${q.faults}</td><td>${q.hits}</td><td>${q.hitRatio}</td></tr>`;
-  }).join('')}</tbody></table>` : '';
-  return `<div class="info"><b>Page replacement lab.</b> Run FIFO, LRU or Optimal on any reference string, or replay the <b>real page references</b> of your processes (the last 100) with the real number of frames (${engine.state.memory.frames.length}) to compare what each algorithm <i>would</i> have done. <b>${REPLACEMENT_ALGORITHMS[v.algorithm].label}:</b> ${REPLACEMENT_ALGORITHMS[v.algorithm].description}</div>
-  <div class="card"><h2>Page replacement</h2><form id="vmform" class="fields">
-   <div style="grid-column:span 2"><label>Reference string</label><input name="refString" value="${v.labels ? '' : esc(v.refString)}" placeholder="${v.labels ? 'replaying the live trace — type a string to run your own' : '1 2 3 4 1 2 5 1'}"></div>
-   <div><label>Frames (1–10)</label><input name="frames" type="number" value="${v.labels ? 3 : v.frames}"></div>
-   <div><label>Algorithm</label><select name="algorithm">${Object.entries(REPLACEMENT_ALGORITHMS).map(([k, a]) => `<option value="${k}"${k === v.algorithm ? ' selected' : ''}>${a.label}</option>`).join('')}</select></div>
-   <div class="row"><button class="primary">Run</button><button type="button" id="vm-example">Load classic example</button><button type="button" id="vm-trace">Replay live page references</button></div></form>
-   <div class="err">${esc(ui.error)}</div></div>
-  ${r ? `<div class="grid"><div class="card"><h2>Page faults</h2><div class="big">${r.faults}</div>fault ratio ${r.faultRatio}</div><div class="card"><h2>Page hits</h2><div class="big">${r.hits}</div>hit ratio ${r.hitRatio}</div></div>` : ''}
-  <div class="card"><h2>Frames over time${v.labels ? ' (live trace, ' + v.frames + ' frames)' : ''}</h2>${table}</div>${r ? `<div class="card"><h2>Compare algorithms (same references and frames)</h2>${cmp}</div>` : ''}`;
+  const cmp = `<table><thead><tr><th>Algorithm</th><th>Page faults</th><th>Hits</th><th>Hit ratio</th></tr></thead><tbody>${Object.keys(REPLACEMENT_ALGORITHMS).map((k) => {
+    const q = lab.results[k];
+    return `<tr class="${k === c.replacementAlgorithm ? 'sel' : ''}"><td>${REPLACEMENT_ALGORITHMS[k].label}${k === c.replacementAlgorithm ? ' <small>(selected)</small>' : ''}</td><td>${q.faults}</td><td>${q.hits}</td><td>${q.hitRatio}</td></tr>`;
+  }).join('')}</tbody></table>`;
+  return `${intro}
+  <div class="grid"><div class="card"><h2>Page faults (${A.label})</h2><div class="big">${r.faults}</div>fault ratio ${r.faultRatio}</div>
+   <div class="card"><h2>Page hits (${A.label})</h2><div class="big">${r.hits}</div>hit ratio ${r.hitRatio}</div>
+   <div class="card"><h2>What the system really did</h2><div class="big">${lab.actual.faults} faults</div>${lab.actual.hits} hits in the same ${lab.count} references<br><small>the real memory was not empty when this window began, so it can differ from the replay</small></div></div>
+  <div class="card"><h2>Frames over time (live trace, ${lab.frames} frames)</h2>${table}</div>
+  <div class="card"><h2>Compare algorithms (same references and frames)</h2>${cmp}</div>`;
 }
 
 function vmPage() {
@@ -381,8 +415,8 @@ function vmPage() {
 }
 
 // RAID ------------------------------------------------------------------------------------------------
-const KIND = { data: 'Data', mirror: 'Mirror copy', parity: 'Parity (P)', parityQ: 'Parity (Q)', ecc: 'Hamming ECC' };
-const METHOD = { single: 'none (no redundancy)', mirror: 'copy from a surviving mirror', xor: 'XOR of the surviving blocks', rs6: 'P (XOR) and Q (Reed-Solomon over GF(2⁸))', hamming: 'Hamming-code equations' };
+const KIND = { data: 'Data', mirror: 'Mirror copy', parity: 'Parity (P)', parityQ: 'Parity (Q)' };
+const METHOD = { single: 'none (no redundancy)', mirror: 'copy from a surviving mirror', xor: 'XOR of the surviving blocks', rs6: 'P (XOR) and Q (Reed-Solomon over GF(2⁸))' };
 const hex = (v) => (v === null || v === undefined ? '--' : v.toString(16).toUpperCase().padStart(2, '0'));
 
 function raidDisks(R, A, ev) {
@@ -405,7 +439,7 @@ function raidDisks(R, A, ev) {
    <tr><td></td>${R.disks.map((x, d) => `<td class="act">${x.status === 'FAILED' ? `<button data-rrepl="${d}"${R.dataLost ? ' disabled' : ''} title="Insert a blank disk and rebuild it">Replace</button>` : `<button class="danger" data-rfail="${d}">Fail disk</button>`}</td>`).join('')}</tr></thead>
    <tbody>${A.cells.map((row, r) => `<tr><th class="rl">Row ${r + 1}</th>${row.map((c, d) => cell(c, d, r)).join('')}</tr>`).join('')}
    <tr><th class="rl">I/O</th>${R.disks.map((x) => `<td class="io">${x.reads}</td>`).join('')}</tr></tbody></table></div>
-  <div class="legend">${['data', 'parity', 'parityQ', 'mirror', 'ecc'].filter((k) => A.cells.some((row) => row.some((c) => c.kind === k))).map((k) => `<span class="cell k-${k}">${KIND[k]}</span>`).join('')}<span class="cell cx">✕ failed disk</span><span class="cell cr">… not rebuilt yet</span> <small>small hex = stored byte (parity = XOR/Reed-Solomon of its stripe) · coloured tag = process page held in that block · I/O = disk reads served</small></div>`;
+  <div class="legend">${['data', 'parity', 'parityQ', 'mirror'].filter((k) => A.cells.some((row) => row.some((c) => c.kind === k))).map((k) => `<span class="cell k-${k}">${KIND[k]}</span>`).join('')}<span class="cell cx">✕ failed disk</span><span class="cell cr">… not rebuilt yet</span> <small>small hex = stored byte (parity = XOR/Reed-Solomon of its stripe) · coloured tag = process page held in that block · I/O = disk reads served</small></div>`;
 }
 
 function raidStatus(R, A, ev) {
@@ -437,14 +471,6 @@ function raidLink() {
    ${rows.length ? `<table><thead><tr><th>PID</th><th>State</th><th>Pages</th><th>Backing-store blocks (page → block on disk)</th></tr></thead><tbody>${rows.map(({ pid, p, bl }) => `<tr><td>${pid}</td><td>${p ? badge(p.state) : ''}</td><td>${bl.length}</td><td>${bl.map((lb, pg) => { const L = raid.array.logical[lb], d = L.disks.length > 1 && !L.span ? L.disks.map((x) => x + 1).join('/') : L.disks[0] + 1; return `<span class="badge" style="background:${colour(pid)};color:#fff;margin:1px" title="page ${pg} → block ${raid.labelOf(lb)}, row ${L.row + 1}">p${pg}→${raid.labelOf(lb)}${L.span ? '' : `@D${d}`}</span>`; }).join(' ')}</td></tr>`).join('')}</tbody></table>` : '<div class="empty">No process has an address space yet. Create processes on the Processes page (or load the demo processes) and Start the simulation to watch page-ins hit the array.</div>'}</div>`;
 }
 
-function raidCompare(R) {
-  const c = R.config;
-  return `<div class="card"><h2>Compare levels for ${c.disks} disks × ${c.capacity} blocks</h2><table><thead><tr><th>Level</th><th>Usable</th><th>Efficiency</th><th>Survives (worst / best)</th></tr></thead><tbody>${LEVEL_IDS.map((l) => {
-    const d = describe(l, c.disks, c.capacity);
-    return `<tr class="${l === c.level ? 'sel' : ''}"><td><b>${RAID_LEVELS[l].label}</b> <small>${RAID_LEVELS[l].name}</small></td>${d.valid ? `<td>${d.usable} blocks (${d.usable * engine.state.config.pageSize} KB)</td><td>${d.efficiency}%</td><td>${d.guaranteed} / ${d.best} disk(s)</td>` : `<td colspan="3" style="color:var(--mut)"><small>${esc(d.error)}</small></td>`}</tr>`;
-  }).join('')}</tbody></table></div>`;
-}
-
 function raidPage() {
   const R = raid.r, A = raid.array, ev = raid.evaluation(), c = R.config;
   return `<div class="info"><b>What is RAID?</b> A RAID array combines several disks into one logical disk to gain speed, capacity or fault tolerance. <b>${RAID_LEVELS[c.level].label} – ${RAID_LEVELS[c.level].name}:</b> ${RAID_LEVELS[c.level].description} Use <i>Fail disk</i> on any disk: the status is computed from the level, the number of failed disks and <i>which</i> disks failed.</div>
@@ -457,7 +483,7 @@ function raidPage() {
    <small>${c.disks} disks × ${c.capacity} blocks = ${c.disks * c.capacity * engine.state.config.pageSize} KB raw → <b>${raid.usableBlocks} usable blocks (${raid.usableBlocks * engine.state.config.pageSize} KB)</b>${A.groups.length > 1 && c.level !== 0 ? ` · ${A.groups.length} groups` : ''}</small></div>
   ${raidStatus(R, A, ev)}
   <div class="card"><h2>Disks</h2>${raidDisks(R, A, ev)}</div>
-  ${raidLink()}${raidCompare(R)}`;
+  ${raidLink()}`;
 }
 
 const VIEWS = { RAID: raidPage, 'Virtual Memory': vmPage, Memory: memPage, 'CPU & Scheduling': cpuPage, Dashboard: dashboard, Processes: processes, 'Event Log': eventLog, Settings: settingsPage };
@@ -490,8 +516,6 @@ document.addEventListener('click', (e) => {
   else if (t.closest('tr[data-pid]')) { ui.selected = t.closest('tr').dataset.pid; render(true); }
   else if (t.dataset.tab) { ui.vmTab = t.dataset.tab; ui.error = ''; render(true); }
   else if (t.closest('tr[data-mpid]')) { ui.memSel = t.closest('tr').dataset.mpid; ui.translation = null; render(true); }
-  else if (t.id === 'vm-example') guard(() => vm.run({ refString: '7 0 1 2 0 3 0 4 2 3 0 3 2 1 2 0 1 7 0 1', frames: 3, algorithm: 'FIFO' }));
-  else if (t.id === 'vm-trace') guard(() => vm.runTrace(engine.state.virtualMemory.lab.algorithm));
   else if (t.id === 'demo-load') guard(() => [
     // name, arrivalTime, burstTime, priority, memoryRequired (KB)
     ['P1', 0, 8, 2, 12],
@@ -527,14 +551,13 @@ document.addEventListener('click', (e) => {
 });
 document.addEventListener('submit', (e) => {
   const F = e.target.id, fd = () => Object.fromEntries(new FormData(e.target));
-  if (['xform', 'vcform', 'mform', 'vmform', 'raform'].includes(F)) {
+  if (['xform', 'vcform', 'mform', 'raform'].includes(F)) {
     e.preventDefault();
     const d = fd();
     if (F === 'mform') guard(() => mm.configure({ memorySize: Number(d.memorySize), pageSize: Number(d.pageSize) }));
     if (F === 'vcform') guard(() => vm.configure({ virtualMemorySize: Number(d.virtualMemorySize), replacementAlgorithm: d.replacementAlgorithm, pageFaultTime: Number(d.pageFaultTime) }));
     if (F === 'xform') guard(() => { ui.translation = mm.translate(ui.memSel, d.address === '' ? NaN : Number(d.address)); });
     if (F === 'raform') guard(() => raid.configure({ level: Number(d.level), disks: Number(d.disks), capacity: Number(d.capacity) }));
-    if (F === 'vmform') guard(() => vm.run({ refString: d.refString, frames: Number(d.frames), algorithm: d.algorithm }));
     return;
   }
   if (e.target.id === 'setform') {

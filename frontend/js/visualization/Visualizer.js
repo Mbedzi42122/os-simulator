@@ -423,7 +423,7 @@ export class Visualizer {
     const lb = this.raid && this.raid.r.swap[pid] ? this.raid.r.swap[pid][page] : undefined;
     if (lb === undefined) return null;
     const L = this.raid.array.logical[lb], pl = this.raid.plan(lb);
-    const disks = L.span ? `D${L.disks[0] + 1}–${L.disks[L.disks.length - 1] + 1}` : 'D' + L.disks.map((d) => d + 1).join('/');
+    const disks = 'D' + L.disks.map((d) => d + 1).join('/');
     return { lb, label: this.raid.labelOf(lb), disks, flag: !pl.ok ? '✕' : pl.reconstructed ? '⚠' : '', note: !pl.ok ? `unreadable: ${pl.reason}` : pl.reconstructed ? 'its disk failed: rebuilt from parity when read' : '' };
   }
 

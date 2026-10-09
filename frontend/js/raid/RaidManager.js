@@ -1,4 +1,4 @@
-import { RAID_LEVELS, MAX_DISKS, MIN_CAPACITY, MAX_CAPACITY, buildArray, checkDisks, evaluate, tolerance, recoverStripe, normalIOs } from './RaidLayout.js';
+import { RAID_LEVELS, MAX_DISKS, MIN_CAPACITY, MAX_CAPACITY, buildArray, checkDisks, evaluate, tolerance, recoverStripe } from './RaidLayout.js';
 
 export const DEFAULT_RAID = { level: 5, disks: 4, capacity: 12 }; // 4 x 12 blocks, RAID 5 -> 36 usable blocks (144 KB at 4 KB/block)
 export const REBUILD_ROWS_PER_TICK = 1;
@@ -35,7 +35,7 @@ export class RaidManager {
       disks: Array.from({ length: config.disks }, () => ({ status: 'OK', progress: 0, reads: 0 })),
       store: this.array.cells.length ? Array.from({ length: config.disks }, (_, d) => this.array.cells.map((row) => row[d].value)) : [],
       swap: keep.swap, lost: keep.lost, dataLost: false,
-      stats: prev?.stats ? { ...prev.stats } : { reads: 0, direct: 0, reconstructed: 0, extraTicks: 0, ioErrors: 0, failures: 0, rebuilds: 0 },
+      stats: prev?.stats ? { ...prev.stats } : { reads: 0, writes: 0, writeErrors: 0, direct: 0, reconstructed: 0, extraTicks: 0, ioErrors: 0, failures: 0, rebuilds: 0 },
     };
   }
 
@@ -160,7 +160,7 @@ export class RaidManager {
     const label = a.cells[L.row][L.disks[0]].label;
     if (this.r.lost.includes(lb)) return { ok: false, lb, label, reason: 'the block was lost when the array was re-created' };
     if (!this.online) return { ok: false, lb, label, reason: `the array is ${this.status} (offline)` };
-    const normal = normalIOs(a, lb), stripe = a.stripes[L.row][L.gi];
+    const stripe = a.stripes[L.row][L.gi];
     const up = (d) => this._avail(d, L.row), direct = (reads, disk) => ({ ok: true, lb, label, row: L.row, disk, reconstructed: false, ios: reads.length, reads, extraTicks: 0 });
     if (stripe.type === 'mirror') {                      // read any readable copy (spread over the copies)
       const pool = L.disks.filter(up);
@@ -168,18 +168,12 @@ export class RaidManager {
       const copy = pool[lb % pool.length];
       return direct([copy], copy);
     }
-    if (L.disks.every(up)) return direct(L.span ? L.disks : [L.disks[0]], L.disks[0]);
+    if (L.disks.every(up)) return direct([L.disks[0]], L.disks[0]);
     const alive = stripe.members.filter((x) => up(x.disk)), failedDisk = L.disks.find((d) => !up(d));
     if (stripe.members.length - alive.length > stripe.tolerance) return { ok: false, lb, label, reason: 'too many disks of its stripe are lost' };
-    // Rebuild the missing block from the surviving blocks of the stripe. RAID 2/3 need only the other data
-    // slices (already read by a normal access) plus one parity/ECC slice; the others read every survivor.
-    let reads = alive.map((x) => x.disk);
-    if (L.span) {
-      const m = stripe.members.find((x) => x.disk === failedDisk);
-      const par = stripe.type === 'hamming' ? stripe.members.find((x) => x.pos === (m.pos & -m.pos)) : stripe.members.find((x) => x.kind === 'parity');
-      reads = [...L.disks.filter(up), par.disk];
-    }
-    return { ok: true, lb, label, row: L.row, disk: failedDisk, reconstructed: true, ios: reads.length, reads, extraTicks: Math.max(0, reads.length - normal) };
+    // Rebuild the missing block from every surviving block of its stripe (one extra read per surviving disk beyond the normal single read).
+    const reads = alive.map((x) => x.disk);
+    return { ok: true, lb, label, row: L.row, disk: failedDisk, reconstructed: true, ios: reads.length, reads, extraTicks: Math.max(0, reads.length - 1) };
   }
 
   /** A page-in: the block of (pid, page) is read from the array. Updates statistics and per-disk I/O counters. */
@@ -192,6 +186,19 @@ export class RaidManager {
     p.reads.forEach((d) => { this.r.disks[d].reads++; });
     if (p.reconstructed) { s.reconstructed++; s.extraTicks += p.extraTicks; this.engine.log('RAID_RECONSTRUCT', `${pid} page ${page} → block ${p.label} lives on failed Disk ${p.disk + 1}: rebuilt from ${p.reads.length} surviving block(s) on disk(s) ${p.reads.map((d) => d + 1).join(', ')} (+${p.extraTicks} tick(s))`, { pid }); }
     else s.direct++;
+    return p;
+  }
+
+  /**
+   * A page-out: a modified page is written back to its block of the array (a clean page needs no write).
+   * Counts a write operation, or a write error when the block cannot be written (array offline / block lost).
+   */
+  writePage(pid, page) {
+    const lb = this.r.swap[pid]?.[page];
+    if (lb === undefined) return { ok: true, lb: null, noBlock: true };
+    const p = this.plan(lb), s = this.r.stats;
+    if (!p.ok) { s.writeErrors++; return p; }
+    s.writes++;
     return p;
   }
 
@@ -239,6 +246,17 @@ export class RaidManager {
       status: ev.status, rebuilding: ev.rebuilding, usableBlocks: this.usableBlocks, usableKB: this.usableBlocks * this.blockKB,
       rawKB: c.disks * c.capacity * this.blockKB, allocated: this.allocatedBlocks().length,
       guaranteed: t.guaranteed, best: t.best, ...this.r.stats,
+      failedDisks: this.r.disks.filter((d) => d.status === 'FAILED').length,
+      rebuildingDisks: this.r.disks.filter((d) => d.status === 'REBUILDING').length,
     };
+  }
+
+  /**
+   * Estimated performance (%) of the array right now: 100 = every block is read directly from a healthy disk.
+   * A block that has to be rebuilt from parity / mirrors counts as half speed, an unreadable block as zero.
+   */
+  estimatedPerformance() {
+    const im = this.impact();
+    return im.total ? +((100 * (im.direct + 0.5 * im.reconstructed)) / im.total).toFixed(1) : 0;
   }
 }

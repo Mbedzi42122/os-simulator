@@ -54,7 +54,7 @@ table.raid .act{text-align:center}table.raid .act button{font-size:11px;padding:
 .cell{border-radius:6px;text-align:center;border:1px solid transparent}td.cell{min-width:84px;height:50px;vertical-align:middle;font-size:13px}td.cell b{display:block}td.cell small{display:block;font:10px ui-monospace,monospace;opacity:.65}
 td.cell i{display:block;font-style:normal;font-size:9px;color:#fff;border-radius:3px;margin:2px 6px 0;padding:0 2px}
 .k-data{background:#d7ecff;border-color:#9cc7f0;color:#0b3d73}.k-mirror{background:#d5f1ee;border-color:#8fd1ca;color:#0e5a52}
-.k-parity{background:#ffe2a8;border-color:#e0a93a;color:#6b4300}.k-parityQ{background:#ead9ff;border-color:#b794e6;color:#4b2085}.k-ecc{background:#ffd5c7;border-color:#e69a82;color:#7a2a10}
+.k-parity{background:#ffe2a8;border-color:#e0a93a;color:#6b4300}.k-parityQ{background:#ead9ff;border-color:#b794e6;color:#4b2085}
 .cx{background:repeating-linear-gradient(45deg,#f6d6d6,#f6d6d6 6px,#fbeaea 6px,#fbeaea 12px);color:#9b1c1c;font-weight:700}.cr{background:#fff8e1;border:1px dashed #d99a00;color:#8a6200}.fresh{box-shadow:0 0 0 2px #d99a0066}
 .legend{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:10px}.legend .cell{padding:3px 10px;font-size:12px}
 @media(max-width:800px){table.raid td.cell,table.raid .dh{min-width:64px}}
@@ -137,3 +137,9 @@ input[type=file]{padding:5px}
 html[data-theme="dark"]{background:#0b0e14}
 html[data-theme="dark"] body{filter:invert(1) hue-rotate(180deg)}
 html[data-theme="dark"] .sidebar,html[data-theme="dark"] .vz-cpu{filter:invert(1) hue-rotate(180deg)}
+
+/* Dashboard metrics, grouped by subsystem */
+.msec h2{display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:10px}.msec h2 small{font-weight:400;font-size:12px;color:var(--mut)}
+.mgrid{display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(170px,1fr))}
+.mtile{border:1px solid var(--line);border-radius:8px;padding:10px 12px;background:#fafbfe}.mlabel{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut)}
+.mval{font-size:24px;font-weight:700;margin:2px 0}.munit{font-size:12px;font-weight:400;color:var(--mut)}.msub{font-size:11px;color:var(--mut)}

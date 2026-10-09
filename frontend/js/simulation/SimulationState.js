@@ -34,7 +34,7 @@ export function createInitialState(config = {}) {
     // Virtual memory: demand paging bookkeeping + the stand-alone page replacement lab
     virtualMemory: {
       waiting: [],                                   // PIDs waiting for backing-store space
-      counters: { faults: 0, hits: 0, replacements: 0, writebacks: 0 },
+      counters: { faults: 0, hits: 0, replacements: 0, writebacks: 0, pagesIn: 0, pagesOut: 0 },   // pagesIn/pagesOut = pages swapped in from / out to secondary storage
       refSeq: 0,                                     // sequence number of the last page reference (the visualisation follows it)
       trace: [],                                     // recent page references of the running system
       lab: { refString: '', refs: [], labels: null, frames: 3, algorithm: 'FIFO', result: null },

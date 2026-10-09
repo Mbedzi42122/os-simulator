@@ -229,11 +229,12 @@ export class VirtualMemory {
       frame = this._victim();
       victim = this._selection(frame);
       evicted = this.mm.unmap(frame);
-      c.replacements++;
-      if (evicted.dirty) { c.writebacks++; this.engine.log('PAGE_WRITEBACK', `${evicted.pid} page ${evicted.page} was modified: written back to the backing store before its frame is reused`, { pid: evicted.pid }); }
+      c.replacements++; c.pagesOut++;                  // the victim is swapped out to secondary storage
+      if (evicted.dirty) { c.writebacks++; this.raid?.writePage(evicted.pid, evicted.page); this.engine.log('PAGE_WRITEBACK', `${evicted.pid} page ${evicted.page} was modified: written back to the backing store before its frame is reused`, { pid: evicted.pid }); }
       this.engine.log('PAGE_REPLACED', `${this.state.config.replacementAlgorithm}: ${evicted.pid} page ${evicted.page} evicted from frame ${frame}`, { pid: evicted.pid });
     }
     this.mm.map(p.pid, page, frame);
+    c.pagesIn++;                                          // the page is swapped in from secondary storage
     if (ins.write) this.mm.markDirty(frame);              // the instruction that faulted is a store: the page will be modified
     this.engine.log('PAGE_FAULT', `${p.pid} page ${page} not in memory → loaded into frame ${frame}${evicted ? ` (replaced ${evicted.pid}:p${evicted.page})` : ''}`, { pid: p.pid });
     const serviceTime = this.state.config.pageFaultTime + (io?.extraTicks || 0);
@@ -278,7 +279,7 @@ export class VirtualMemory {
 
   stats() {
     const c = this.vm.counters, refs = c.faults + c.hits, cap = this.capacityPages, used = this.mm.allocatedPages();
-    return { ...c, references: refs, faultRate: refs ? +(c.faults / refs).toFixed(3) : 0,
+    return { ...c, references: refs, pagesTransferred: c.pagesIn + c.pagesOut, faultRate: refs ? +(c.faults / refs).toFixed(3) : 0,
       capacityPages: cap, usedPages: used, waiting: [...this.vm.waiting], raid: this.raid ? this.raid.stats() : null };
   }
 
@@ -290,6 +291,24 @@ export class VirtualMemory {
   }
 
   // Page replacement lab ------------------------------------------------------------
+  /**
+   * The lab, live: replays the last `limit` page references recorded by the running processes through every
+   * algorithm, using the system's own number of frames (RAM / page size) and the algorithm selected in the settings.
+   * Nothing is stored or logged, so the UI can recompute it on every tick of the simulation clock.
+   * `actual` is what the real system did in the same window (it started that window with whatever was in memory).
+   */
+  liveLab(limit = 100) {
+    const t = this.vm.trace.slice(-limit), frames = this.mm.frames.length, algorithm = this.state.config.replacementAlgorithm;
+    if (!t.length || frames < 1) return { empty: true, frames, algorithm, count: 0 };
+    const labels = [], ids = new Map();
+    const refs = t.map((x) => { const k = `${x.pid}:p${x.page}`; if (!ids.has(k)) { ids.set(k, labels.length); labels.push(k); } return ids.get(k); });
+    const results = {};
+    for (const k of Object.keys(REPLACEMENT_ALGORITHMS)) results[k] = simulateReplacement(refs, frames, k);
+    const faults = t.filter((x) => x.fault).length;
+    return { empty: false, frames, algorithm, count: refs.length, refs, labels, result: results[algorithm], results,
+      actual: { faults, hits: t.length - faults }, from: t[0].time, to: t[t.length - 1].time };
+  }
+
   run({ refString, frames, algorithm }) {
     const refs = parseReferenceString(refString);
     if (!Number.isInteger(frames) || frames < 1 || frames > 10) throw new Error('Number of frames must be a whole number from 1 to 10.');
